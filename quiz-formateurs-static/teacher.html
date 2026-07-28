@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prof — Quiz Formateurs</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .wheel-wrap{position:relative; width:280px; height:280px; margin:0 auto;}
+  .pointer{position:absolute; top:-14px; left:50%; transform:translateX(-50%); width:0; height:0; border-left:16px solid transparent; border-right:16px solid transparent; border-top:26px solid var(--gold); z-index:5;}
+  .wheel-disc{width:100%; height:100%; border-radius:50%; border:6px solid var(--navy2); box-shadow:0 0 0 4px var(--gold), 0 10px 30px rgba(0,0,0,0.5); transition:transform 3s cubic-bezier(.17,.67,.12,1); display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--teal) 0deg 90deg, var(--coral) 90deg 180deg, var(--gold) 180deg 270deg, #7A8FE0 270deg 360deg);}
+  .team-pick{display:flex; gap:10px; flex-wrap:wrap; justify-content:center;}
+  .team-pick button{padding:10px 18px; border-radius:12px; font-weight:800; color:#0F1E38;}
+  .team-pick button.active-pick{outline:3px solid #fff;}
+  .qr-hint{font-size:0.85rem; color:var(--muted); text-align:center;}
+</style>
+</head>
+<body>
+<div class="scoreboard" id="scoreboard"></div>
+<main><div class="screen" id="screen"></div></main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="firebase-config.js"></script>
+
+<!-- Un fichier <script> par cours disponible. Ajoute une ligne ici à chaque
+     nouveau cours déposé dans le dossier courses/ (voir README.md). -->
+<script src="courses/exemple-ndrc-relation-client.js"></script>
+
+<script src="courses/manifest.js"></script>
+<script>
+const DIFFICULTY_LABELS = { basique:'Basique', confirme:'Confirmé', expert:'Expert', consultant_junior:'Consultant junior' };
+const GAME_LABELS = { quiz:'Quiz à choix multiples', vf:'Vrai / Faux', estimation:'Estimation chiffrée', objections:'Mise en situation orale' };
+
+/* ============ STATE ============ */
+let roomCode = null;
+let sessionRef = null;
+let teams = {};
+let answers = {};
+let broadcast = { game:null, phase:'idle', payload:{} };
+let used = { quiz:[], wheel:[], vf:[], estimation:[] };
+let screenName = 'setup';
+let wheelActiveTeam = null;
+
+// Sélection en cours (écran "setup") puis active pour la partie en cours
+let setupCourseId = null;
+let setupDifficulty = null;
+let setupGamesEnabled = { quiz:true, vf:true, estimation:true, objections:true };
+
+let ACTIVE_QUIZ = [];
+let ACTIVE_VF = [];
+let ACTIVE_ESTIMATION = [];
+let ACTIVE_OBJECTIONS = [];
+let ACTIVE_GAMES = { quiz:true, vf:true, estimation:true, objections:true };
+let ACTIVE_COURSE_TITLE = '';
+
+function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
+
+function getCourseById(id){
+  const entry = (window.COURSE_MANIFEST||[]).find(c=>c.id===id);
+  if(!entry) return null;
+  return { entry, data: window[entry.globalVar] };
+}
+function availableDifficulties(courseId){
+  const c = getCourseById(courseId);
+  if(!c || !c.data) return [];
+  return Object.keys(c.data.difficulties||{});
+}
+
+/* ============ RENDER: SCOREBOARD ============ */
+function renderScoreboard(){
+  const sb = document.getElementById('scoreboard');
+  let html = `<div class="brand">🎓 Quiz Formateurs — Prof</div>`;
+  if(roomCode){
+    html += `<div class="team-pill"><span class="tname">Code salle</span><span class="tscore">${roomCode}</span></div>`;
+  }
+  Object.values(teams).forEach((t,i)=>{
+    html += `<div class="team-pill">
+      <div class="team-dot" style="background:${t.color}">${i+1}</div>
+      <span class="tname">${t.name}</span>
+      <span class="tscore">${t.score||0} pts</span>
+    </div>`;
+  });
+  if(roomCode && screenName!=='setup'){
+    html += `<button class="topbar-btn" onclick="goHub()">🏠 Menu</button>`;
+  }
+  sb.innerHTML = html;
+}
+
+/* ============ FIREBASE WIRING ============ */
+function createSession(){
+  roomCode = genCode();
+  sessionRef = db.ref('qf_sessions/'+roomCode);
+  used = { quiz:[], wheel:[], vf:[], estimation:[] };
+  sessionRef.set({
+    createdAt: Date.now(),
+    status: 'lobby',
+    broadcast: { game:null, phase:'idle', payload:{} },
+    used
+  }).then(()=>{
+    localStorage.setItem('qf_active_session', JSON.stringify({
+      roomCode, courseId: setupCourseId, difficulty: setupDifficulty, gamesEnabled: ACTIVE_GAMES
+    }));
+    attachListeners();
+    screenName = 'lobby';
+    render();
+  });
+}
+function attachListeners(){
+  sessionRef.child('teams').on('value', snap=>{
+    teams = snap.val() || {};
+    renderScoreboard();
+    if(screenName==='lobby') render();
+  });
+  sessionRef.child('answers').on('value', snap=>{
+    answers = snap.val() || {};
+    if(screenName==='quiz' || screenName==='vf' || screenName==='estimation') render();
+  });
+  sessionRef.child('used').on('value', snap=>{
+    used = snap.val() || { quiz:[], wheel:[], vf:[], estimation:[] };
+  });
+}
+function pushBroadcast(game, phase, payload){
+  broadcast = {game, phase, payload};
+  sessionRef.child('broadcast').set(broadcast);
+}
+function clearAnswers(){ sessionRef.child('answers').set({}); answers = {}; }
+function markUsed(game, idx){
+  used[game] = used[game]||[];
+  used[game].push(idx);
+  sessionRef.child('used/'+game).set(used[game]);
+}
+function resetUsed(game){ used[game] = []; sessionRef.child('used/'+game).set([]); }
+function addScore(teamId, pts){
+  const current = (teams[teamId] && teams[teamId].score) || 0;
+  sessionRef.child('teams/'+teamId+'/score').set(current + pts);
+}
+
+/* ============ ROUTER ============ */
+function goHub(){ screenName='hub'; pushBroadcast(null, 'idle', {}); render(); }
+function render(){
+  renderScoreboard();
+  const el = document.getElementById('screen');
+  if(screenName==='setup') el.innerHTML = renderSetup();
+  else if(screenName==='lobby') el.innerHTML = renderLobby();
+  else if(screenName==='hub') el.innerHTML = renderHub();
+  else if(screenName==='quiz') el.innerHTML = renderQuiz();
+  else if(screenName==='wheel') el.innerHTML = renderWheel();
+  else if(screenName==='vf') el.innerHTML = renderVF();
+  else if(screenName==='estimation') el.innerHTML = renderEstimation();
+  else if(screenName==='podium') el.innerHTML = renderPodium();
+}
+
+/* ============ SETUP (choix du cours) ============ */
+function renderSetup(){
+  const manifest = window.COURSE_MANIFEST || [];
+  if(!setupCourseId && manifest.length) setupCourseId = manifest[0].id;
+  if(setupCourseId && !setupDifficulty){
+    const diffs = availableDifficulties(setupCourseId);
+    setupDifficulty = diffs[0] || null;
+  }
+  const courseOptions = manifest.map(c=>`<option value="${c.id}" ${c.id===setupCourseId?'selected':''}>${c.title} (${c.level})</option>`).join('');
+  const diffs = availableDifficulties(setupCourseId);
+  const diffOptions = diffs.map(d=>`<option value="${d}" ${d===setupDifficulty?'selected':''}>${DIFFICULTY_LABELS[d]||d}</option>`).join('');
+
+  const bank = setupCourseId && setupDifficulty ? getCourseById(setupCourseId).data.difficulties[setupDifficulty] : null;
+  const gameChecks = ['quiz','vf','estimation','objections'].map(g=>{
+    const count = bank ? (bank[g]||[]).length : 0;
+    const disabled = count===0 ? 'disabled' : '';
+    const checked = setupGamesEnabled[g] && count>0 ? 'checked' : '';
+    return `<div class="checkbox-line">
+      <input type="checkbox" id="game-${g}" ${checked} ${disabled} onchange="setupGamesEnabled['${g}']=this.checked">
+      <label for="game-${g}" style="margin:0;">${GAME_LABELS[g]} <span class="progress-note">(${count})</span></label>
+    </div>`;
+  }).join('');
+
+  if(manifest.length===0){
+    return `<h1 class="title">Quiz <span>Formateurs</span></h1>
+      <div class="card" style="text-align:center;"><p class="progress-note">Aucun cours disponible. Ajoute un fichier dans le dossier "courses/" et déclare-le dans manifest.js (voir README.md).</p></div>`;
+  }
+
+  return `
+    <h1 class="title">Quiz <span>Formateurs</span></h1>
+    <p class="subtitle">Choisis le cours et le niveau de difficulté, puis crée la salle.</p>
+    <div class="card">
+      <div class="setup-row">
+        <label>Cours</label>
+        <select onchange="setupCourseId=this.value; setupDifficulty=null; render();">${courseOptions}</select>
+      </div>
+      <div class="setup-row">
+        <label>Niveau de difficulté</label>
+        <select onchange="setupDifficulty=this.value; render();">${diffOptions}</select>
+      </div>
+      <div class="setup-row">
+        <label>Jeux activés pour cette séance</label>
+        ${gameChecks}
+      </div>
+      <button class="btn" style="width:100%;" onclick="confirmSetupAndCreate()">Créer la session ➜</button>
+    </div>
+  `;
+}
+function confirmSetupAndCreate(){
+  const c = getCourseById(setupCourseId);
+  const bank = c.data.difficulties[setupDifficulty];
+  ACTIVE_QUIZ = bank.quiz || [];
+  ACTIVE_VF = bank.vf || [];
+  ACTIVE_ESTIMATION = bank.estimation || [];
+  ACTIVE_OBJECTIONS = bank.objections || [];
+  ACTIVE_GAMES = { ...setupGamesEnabled };
+  ACTIVE_COURSE_TITLE = c.entry.title + ' — ' + (DIFFICULTY_LABELS[setupDifficulty]||setupDifficulty);
+  createSession();
+}
+
+/* ============ LOBBY ============ */
+function renderLobby(){
+  const teamRows = Object.keys(teams).length
+    ? Object.values(teams).map(t=>`<div class="live-row"><span>${t.name}</span></div>`).join('')
+    : `<p class="progress-note">En attente que les équipes rejoignent…</p>`;
+  return `
+    <h1 class="title">Salle <span>${roomCode}</span></h1>
+    <p class="subtitle">${ACTIVE_COURSE_TITLE}</p>
+    <p class="subtitle qr-hint">Donnez ce code aux équipes. Chacune ouvre la page "équipe" (team.html) sur son appareil, saisit le code + son nom d'équipe.</p>
+    <div class="card"><div class="live-list">${teamRows}</div></div>
+    <button class="btn" onclick="goHub()" ${Object.keys(teams).length===0?'disabled':''}>Démarrer la séance ➜</button>
+  `;
+}
+
+/* ============ HUB ============ */
+function renderHub(){
+  let cards = '';
+  if(ACTIVE_GAMES.quiz && ACTIVE_QUIZ.length){
+    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startQuiz()"><h3>⚡ Quiz Éclair</h3><p class="progress-note">${ACTIVE_QUIZ.length} questions</p></button>`;
+  }
+  if(ACTIVE_GAMES.objections && ACTIVE_OBJECTIONS.length){
+    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startWheel()"><h3>🎡 Mise en situation orale</h3><p class="progress-note">${ACTIVE_OBJECTIONS.length} situations</p></button>`;
+  }
+  if(ACTIVE_GAMES.vf && ACTIVE_VF.length){
+    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startVF()"><h3>✅❌ Vrai/Faux Éclair</h3><p class="progress-note">${ACTIVE_VF.length} affirmations</p></button>`;
+  }
+  if(ACTIVE_GAMES.estimation && ACTIVE_ESTIMATION.length){
+    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startEstimation()"><h3>🎯 Estimation Chiffrée</h3><p class="progress-note">${ACTIVE_ESTIMATION.length} défis</p></button>`;
+  }
+  return `
+    <h1 class="title">Choisissez un <span>jeu</span></h1>
+    <p class="subtitle">${ACTIVE_COURSE_TITLE}</p>
+    <div class="hub-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; width:100%;">
+      ${cards}
+    </div>
+    <button class="btn secondary" onclick="screenName='podium'; pushBroadcast(null,'podium',{teams}); render();">🏆 Voir le podium</button>
+  `;
+}
+
+/* ============ QUIZ ============ */
+function shuffleAnswers(answers, correctIdx){
+  const indexed = answers.map((text, i) => ({ text, isCorrect: i === correctIdx }));
+  for(let i = indexed.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [indexed[i], indexed[j]] = [indexed[j], indexed[i]];
+  }
+  return { a: indexed.map(x => x.text), correct: indexed.findIndex(x => x.isCorrect) };
+}
+let currentQuizIdx = null;
+let currentQuizShuffled = null;
+function startQuiz(){ screenName='quiz'; currentQuizIdx=null; nextQuizQuestion(); }
+function poolQuiz(){ return ACTIVE_QUIZ.map((q,i)=>i).filter(i=>!(used.quiz||[]).includes(i)); }
+function nextQuizQuestion(){
+  const pool = poolQuiz();
+  currentQuizIdx = pool.length ? pool[Math.floor(Math.random()*pool.length)] : null;
+  clearAnswers();
+  if(currentQuizIdx!==null){
+    const q = ACTIVE_QUIZ[currentQuizIdx];
+    currentQuizShuffled = shuffleAnswers(q.a, q.correct);
+    pushBroadcast('quiz','question',{q:q.q, a:currentQuizShuffled.a, cat:q.cat});
+  } else {
+    currentQuizShuffled = null;
+    pushBroadcast('quiz','done',{});
+  }
+  render();
+}
+function revealQuiz(){
+  const q = ACTIVE_QUIZ[currentQuizIdx];
+  const sh = currentQuizShuffled;
+  Object.entries(answers).forEach(([teamId, ans])=>{
+    if(ans && ans.value===sh.correct) addScore(teamId, 1);
+  });
+  markUsed('quiz', currentQuizIdx);
+  pushBroadcast('quiz','revealed',{q:q.q, a:sh.a, cat:q.cat, correct:sh.correct});
+  render();
+}
+function renderQuiz(){
+  const remaining = poolQuiz().length;
+  if(currentQuizIdx===null){
+    return `<h1 class="title">Quiz <span>Éclair</span></h1>
+      <div class="card" style="text-align:center;"><p class="progress-note">Toutes les questions sont passées 🎉</p>
+      <button class="btn secondary" onclick="resetUsed('quiz'); nextQuizQuestion();">Recommencer ce lot</button></div>
+      <button class="btn secondary" onclick="goHub()">← Menu</button>`;
+  }
+  const q = ACTIVE_QUIZ[currentQuizIdx];
+  const answeredCount = Object.keys(answers).length;
+  const teamCount = Object.keys(teams).length;
+  const revealed = broadcast.phase==='revealed';
+  const answersHtml = currentQuizShuffled.a.map((ans,i)=>{
+    let cls = 'answer-btn disabled';
+    if(revealed && i===currentQuizShuffled.correct) cls += ' correct';
+    return `<div class="${cls}">${ans}</div>`;
+  }).join('');
+  return `
+    <h1 class="title">Quiz <span>Éclair</span></h1>
+    <div class="card">
+      <span class="qtag">${q.cat}</span>
+      <p class="question-text">${q.q}</p>
+      <div class="answers">${answersHtml}</div>
+      <p class="progress-note" style="margin-top:14px;">${answeredCount}/${teamCount} équipes ont répondu</p>
+      <div class="btn-row" style="margin-top:14px;">
+        ${!revealed ? `<button class="btn coral" onclick="revealQuiz()">Révéler (attribue les points)</button>` : `<button class="btn" onclick="nextQuizQuestion()">Question suivante ➜</button>`}
+      </div>
+    </div>
+    <p class="progress-note">${remaining} question(s) restante(s)</p>
+    <button class="btn secondary" onclick="goHub()">← Menu</button>
+  `;
+}
+
+/* ============ VRAI / FAUX ============ */
+let currentVFIdx = null;
+function startVF(){ screenName='vf'; currentVFIdx=null; nextVFQuestion(); }
+function poolVF(){ return ACTIVE_VF.map((v,i)=>i).filter(i=>!(used.vf||[]).includes(i)); }
+function nextVFQuestion(){
+  const pool = poolVF();
+  currentVFIdx = pool.length ? pool[Math.floor(Math.random()*pool.length)] : null;
+  clearAnswers();
+  if(currentVFIdx!==null) pushBroadcast('vf','question',{s:ACTIVE_VF[currentVFIdx].s});
+  else pushBroadcast('vf','done',{});
+  render();
+}
+function revealVF(){
+  const item = ACTIVE_VF[currentVFIdx];
+  Object.entries(answers).forEach(([teamId, ans])=>{
+    if(ans && ans.value===item.v) addScore(teamId, 1);
+  });
+  markUsed('vf', currentVFIdx);
+  pushBroadcast('vf','revealed',{s:item.s, v:item.v, expl:item.expl});
+  render();
+}
+function renderVF(){
+  const remaining = poolVF().length;
+  if(currentVFIdx===null){
+    return `<h1 class="title">Vrai/Faux <span>Éclair</span></h1>
+      <div class="card" style="text-align:center;"><p class="progress-note">Toutes les affirmations sont passées 🎉</p>
+      <button class="btn secondary" onclick="resetUsed('vf'); nextVFQuestion();">Recommencer ce lot</button></div>
+      <button class="btn secondary" onclick="goHub()">← Menu</button>`;
+  }
+  const item = ACTIVE_VF[currentVFIdx];
+  const answeredCount = Object.keys(answers).length;
+  const teamCount = Object.keys(teams).length;
+  const revealed = broadcast.phase==='revealed';
+  return `
+    <h1 class="title">Vrai/Faux <span>Éclair</span></h1>
+    <div class="card" style="text-align:center;">
+      <p class="question-text">${item.s}</p>
+      ${revealed ? `<p class="progress-note" style="font-size:1rem;"><b style="color:var(--gold)">${item.v?'VRAI':'FAUX'}</b> — ${item.expl}</p>` : ''}
+      <p class="progress-note">${answeredCount}/${teamCount} équipes ont répondu</p>
+      <div class="btn-row" style="margin-top:14px;">
+        ${!revealed ? `<button class="btn coral" onclick="revealVF()">Révéler (attribue les points)</button>` : `<button class="btn" onclick="nextVFQuestion()">Affirmation suivante ➜</button>`}
+      </div>
+    </div>
+    <p class="progress-note">${remaining} affirmation(s) restante(s)</p>
+    <button class="btn secondary" onclick="goHub()">← Menu</button>
+  `;
+}
+
+/* ============ ESTIMATION ============ */
+let currentEstIdx = null;
+function startEstimation(){ screenName='estimation'; currentEstIdx=null; nextEstQuestion(); }
+function poolEst(){ return ACTIVE_ESTIMATION.map((e,i)=>i).filter(i=>!(used.estimation||[]).includes(i)); }
+function nextEstQuestion(){
+  const pool = poolEst();
+  currentEstIdx = pool.length ? pool[Math.floor(Math.random()*pool.length)] : null;
+  clearAnswers();
+  if(currentEstIdx!==null){
+    pushBroadcast('estimation','question',{q:ACTIVE_ESTIMATION[currentEstIdx].q, unit:ACTIVE_ESTIMATION[currentEstIdx].unit});
+  } else {
+    pushBroadcast('estimation','done',{});
+  }
+  render();
+}
+function revealEst(){
+  const item = ACTIVE_ESTIMATION[currentEstIdx];
+  const ranked = Object.entries(answers)
+    .filter(([id,a])=>a && typeof a.value==='number')
+    .map(([id,a])=>({id, value:a.value, dist:Math.abs(a.value-item.answer)}))
+    .sort((a,b)=>a.dist-b.dist);
+  const pointsTable = [3,2,1];
+  ranked.forEach((r,i)=>{ if(pointsTable[i]) addScore(r.id, pointsTable[i]); });
+  markUsed('estimation', currentEstIdx);
+  pushBroadcast('estimation','revealed',{
+    q:item.q, unit:item.unit, answer:item.answer, expl:item.expl,
+    ranking: ranked.map((r,i)=>({name:(teams[r.id]||{}).name||'?', value:r.value, pts:pointsTable[i]||0}))
+  });
+  render();
+}
+function renderEstimation(){
+  const remaining = poolEst().length;
+  if(currentEstIdx===null){
+    return `<h1 class="title">Estimation <span>Chiffrée</span></h1>
+      <div class="card" style="text-align:center;"><p class="progress-note">Tous les défis sont passés 🎉</p>
+      <button class="btn secondary" onclick="resetUsed('estimation'); nextEstQuestion();">Recommencer ce lot</button></div>
+      <button class="btn secondary" onclick="goHub()">← Menu</button>`;
+  }
+  const item = ACTIVE_ESTIMATION[currentEstIdx];
+  const answeredCount = Object.keys(answers).length;
+  const teamCount = Object.keys(teams).length;
+  const revealed = broadcast.phase==='revealed';
+  let rankingHtml = '';
+  if(revealed){
+    const ranked = Object.entries(answers)
+      .filter(([id,a])=>a && typeof a.value==='number')
+      .map(([id,a])=>({name:(teams[id]||{}).name||'?', value:a.value, dist:Math.abs(a.value-item.answer)}))
+      .sort((a,b)=>a.dist-b.dist);
+    rankingHtml = `<div class="live-list" style="margin-top:14px;">` + ranked.map((r,i)=>
+      `<div class="live-row"><span>${i+1}. ${r.name}</span><span>${r.value} ${item.unit}</span></div>`
+    ).join('') + `</div>`;
+  }
+  return `
+    <h1 class="title">Estimation <span>Chiffrée</span></h1>
+    <div class="card" style="text-align:center;">
+      <p class="question-text">${item.q}</p>
+      ${revealed ? `<p class="progress-note" style="font-size:1rem;"><b style="color:var(--gold)">Réponse : ${item.answer} ${item.unit}</b> — ${item.expl}</p>${rankingHtml}` : ''}
+      <p class="progress-note">${answeredCount}/${teamCount} équipes ont répondu</p>
+      <div class="btn-row" style="margin-top:14px;">
+        ${!revealed ? `<button class="btn coral" onclick="revealEst()">Révéler (classement + points)</button>` : `<button class="btn" onclick="nextEstQuestion()">Défi suivant ➜</button>`}
+      </div>
+    </div>
+    <p class="progress-note">${remaining} défi(s) restant(s)</p>
+    <button class="btn secondary" onclick="goHub()">← Menu</button>
+  `;
+}
+
+/* ============ WHEEL (mise en situation orale) ============ */
+function startWheel(){
+  screenName='wheel';
+  wheelActiveTeam = Object.keys(teams)[0] || null;
+  pushBroadcast('wheel','lobby',{});
+  render();
+}
+function poolWheel(){ return ACTIVE_OBJECTIONS.map((o,i)=>i).filter(i=>!(used.wheel||[]).includes(i)); }
+function pickActiveTeam(teamId){ wheelActiveTeam = teamId; render(); }
+function spinWheelTeacher(){
+  const pool = poolWheel();
+  if(pool.length===0 || !wheelActiveTeam) return;
+  const idx = pool[Math.floor(Math.random()*pool.length)];
+  const disc = document.getElementById('teacherWheelDisc');
+  if(disc) disc.style.transform = `rotate(${360*4 + Math.random()*360}deg)`;
+  setTimeout(()=>{
+    markUsed('wheel', idx);
+    const timerEnd = Date.now() + 45000;
+    pushBroadcast('wheel','turn',{
+      activeTeamId: wheelActiveTeam,
+      activeTeamName: teams[wheelActiveTeam].name,
+      objection: ACTIVE_OBJECTIONS[idx],
+      timerEnd
+    });
+    render();
+  }, 3100);
+}
+function scoreWheel(pts){
+  if(!wheelActiveTeam) return;
+  addScore(wheelActiveTeam, pts);
+  pushBroadcast('wheel','scored',{
+    activeTeamName: teams[wheelActiveTeam].name,
+    pts,
+    objection: (broadcast.payload && broadcast.payload.objection) || ''
+  });
+  render();
+}
+function nextWheelTurn(){
+  const teamIds = Object.keys(teams);
+  const idx = teamIds.indexOf(wheelActiveTeam);
+  wheelActiveTeam = teamIds[(idx+1)%teamIds.length] || null;
+  pushBroadcast('wheel','lobby',{});
+  render();
+}
+function renderWheel(){
+  const remaining = poolWheel().length;
+  const teamPicks = Object.entries(teams).map(([id,t])=>
+    `<button style="background:${t.color}; ${wheelActiveTeam===id?'outline:3px solid #fff;':''}" onclick="pickActiveTeam('${id}')">${t.name}</button>`
+  ).join('');
+
+  let body = '';
+  if(broadcast.phase==='turn'){
+    body = `
+      <div class="objection-reveal" style="text-align:center; font-size:1.3rem; font-weight:700; background:var(--navy3); padding:16px; border-radius:14px;">« ${broadcast.payload.objection} »</div>
+      <p class="progress-note">Équipe : <b style="color:var(--gold)">${broadcast.payload.activeTeamName}</b> — réponse à l'oral devant la classe</p>
+      <div id="wheelTimer" class="timer-display">45</div>
+      <div class="award-box" style="text-align:center;">
+        <p class="progress-note">Attribuer les points pour cette réponse :</p>
+        <div class="btn-row">
+          <button class="btn coral" onclick="scoreWheel(3)">+3 (excellente réponse)</button>
+          <button class="btn gold" onclick="scoreWheel(2)">+2 (correcte)</button>
+          <button class="btn secondary" onclick="scoreWheel(1)">+1 (a essayé)</button>
+          <button class="btn secondary" onclick="scoreWheel(0)">0</button>
+        </div>
+      </div>
+    `;
+  } else if(broadcast.phase==='scored'){
+    body = `
+      <div class="card" style="text-align:center;">
+        <p class="progress-note">${broadcast.payload.activeTeamName} a reçu <b style="color:var(--gold)">+${broadcast.payload.pts} pt(s)</b> pour : « ${broadcast.payload.objection} »</p>
+      </div>
+      <button class="btn" onclick="nextWheelTurn()">Équipe suivante ➜</button>
+    `;
+  } else {
+    body = `
+      <p class="progress-note">Choisissez l'équipe qui va être interrogée :</p>
+      <div class="team-pick">${teamPicks}</div>
+      <div class="wheel-wrap"><div class="pointer"></div><div class="wheel-disc" id="teacherWheelDisc"></div></div>
+      <button class="btn coral" onclick="spinWheelTeacher()" ${remaining===0 || !wheelActiveTeam?'disabled':''}>${remaining===0?'Toutes passées 🎉':'🎡 Tourner la roue'}</button>
+    `;
+  }
+  return `
+    <h1 class="title">Mise en <span>situation orale</span></h1>
+    ${body}
+    <p class="progress-note">${remaining} situation(s) restante(s)</p>
+    <button class="btn secondary" onclick="goHub()">← Menu</button>
+  `;
+}
+setInterval(()=>{
+  const el = document.getElementById('wheelTimer');
+  if(el && broadcast.phase==='turn' && broadcast.payload.timerEnd){
+    const remain = Math.max(0, Math.round((broadcast.payload.timerEnd - Date.now())/1000));
+    el.textContent = remain;
+    el.className = 'timer-display' + (remain<=10?' low':'');
+  }
+},1000);
+
+/* ============ PODIUM ============ */
+function renderPodium(){
+  const sorted = Object.values(teams).sort((a,b)=>(b.score||0)-(a.score||0));
+  const rows = sorted.map((t,i)=>{
+    const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'—';
+    return `<div class="live-row"><span>${medal} ${t.name}</span><span style="color:var(--gold); font-weight:800;">${t.score||0} pts</span></div>`;
+  }).join('');
+  return `
+    <h1 class="title">🏆 Podium <span>final</span></h1>
+    <div class="card"><div class="live-list">${rows}</div></div>
+    <button class="btn secondary" onclick="goHub()">← Menu</button>
+  `;
+}
+
+/* ============ INIT (reprise après rechargement de page) ============ */
+(function init(){
+  const saved = localStorage.getItem('qf_active_session');
+  if(saved){
+    try{
+      const s = JSON.parse(saved);
+      const c = getCourseById(s.courseId);
+      if(c && c.data.difficulties[s.difficulty]){
+        const bank = c.data.difficulties[s.difficulty];
+        ACTIVE_QUIZ = bank.quiz || [];
+        ACTIVE_VF = bank.vf || [];
+        ACTIVE_ESTIMATION = bank.estimation || [];
+        ACTIVE_OBJECTIONS = bank.objections || [];
+        ACTIVE_GAMES = s.gamesEnabled || ACTIVE_GAMES;
+        ACTIVE_COURSE_TITLE = c.entry.title + ' — ' + (DIFFICULTY_LABELS[s.difficulty]||s.difficulty);
+        roomCode = s.roomCode;
+        sessionRef = db.ref('qf_sessions/'+roomCode);
+        sessionRef.once('value').then(snap=>{
+          if(snap.exists()){
+            attachListeners();
+            screenName = 'hub';
+            render();
+          } else {
+            localStorage.removeItem('qf_active_session');
+            render();
+          }
+        });
+        return;
+      }
+    }catch(e){ /* ignore, on repart de zéro */ }
+  }
+  render();
+})();
+</script>
+</body>
+</html>
