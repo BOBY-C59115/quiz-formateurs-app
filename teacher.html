@@ -11,8 +11,14 @@
   .wheel-disc{width:100%; height:100%; border-radius:50%; border:6px solid var(--navy2); box-shadow:0 0 0 4px var(--gold), 0 10px 30px rgba(0,0,0,0.5); transition:transform 3s cubic-bezier(.17,.67,.12,1); display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--teal) 0deg 90deg, var(--coral) 90deg 180deg, var(--gold) 180deg 270deg, #7A8FE0 270deg 360deg);}
   .team-pick{display:flex; gap:10px; flex-wrap:wrap; justify-content:center;}
   .team-pick button{padding:10px 18px; border-radius:12px; font-weight:800; color:#0F1E38;}
-  .team-pick button.active-pick{outline:3px solid #fff;}
   .qr-hint{font-size:0.85rem; color:var(--muted); text-align:center;}
+  .lib-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:16px; width:100%;}
+  .lib-card{background:var(--navy2); border-radius:var(--card-radius); padding:18px; text-align:left; display:flex; flex-direction:column; gap:8px;}
+  .lib-card h3{font-size:1.05rem;}
+  .diff-row{display:flex; align-items:center; justify-content:space-between; background:#0F1E38; border-radius:10px; padding:8px 12px; margin-top:4px;}
+  textarea.prompt-box{min-height:220px; font-family:monospace; font-size:0.82rem;}
+  .step-num{display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; border-radius:50%; background:var(--teal); color:#08201B; font-weight:800; margin-right:8px; flex-shrink:0;}
+  .step-line{display:flex; align-items:flex-start; gap:4px; margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -22,15 +28,71 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="firebase-config.js"></script>
-
-<!-- Un fichier <script> par cours disponible. Ajoute une ligne ici à chaque
-     nouveau cours déposé dans le dossier courses/ (voir README.md). -->
-<script src="courses/exemple-ndrc-relation-client.js"></script>
-
-<script src="courses/manifest.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
 const DIFFICULTY_LABELS = { basique:'Basique', confirme:'Confirmé', expert:'Expert', consultant_junior:'Consultant junior' };
 const GAME_LABELS = { quiz:'Quiz à choix multiples', vf:'Vrai / Faux', estimation:'Estimation chiffrée', objections:'Mise en situation orale' };
+
+/* ============ BIBLIOTHÈQUE DE COURS (stockée dans ce navigateur) ============ */
+const SEED_COURSE = {
+  id: 'ndrc-relation-client',
+  title: 'BTS NDRC — Relation client à distance et digitalisation',
+  level: 'BTS 1re année',
+  hasOfficialProgram: false,
+  programReference: '',
+  focusTheme: '',
+  difficulties: {
+    confirme: {
+      quiz: [
+        {cat:'vente', q:"Un client dit : « Je veux LE meilleur produit du marché, peu importe le prix. » Quelle motivation SONCAS domine ?", a:["Sécurité","Orgueil","Confort","Argent"], correct:1},
+        {cat:'vente', q:"Dans la méthode CAB, que signifie le « B » ?", a:["Bénéfice","Budget","Besoin","Bonus"], correct:0},
+        {cat:'vente', q:"Le SONCAS est utilisé principalement pour :", a:["Analyser les motivations d'achat","Calculer une marge","Segmenter un fichier client","Fixer un prix"], correct:0},
+        {cat:'digital', q:"Le SEO désigne :", a:["Search Engine Optimization","Sales Efficiency Objective","Social Engagement Online","Site Editing Option"], correct:0},
+        {cat:'digital', q:"Le RGPD encadre principalement :", a:["Les prix de vente","La protection des données personnelles","Les délais de livraison","La fiscalité des entreprises"], correct:1},
+        {cat:'relation', q:"Le NPS mesure surtout :", a:["La satisfaction immédiate","La probabilité de recommandation","Le taux de conversion","Le coût d'acquisition"], correct:1},
+        {cat:'relation', q:"Un CRM sert à :", a:["Gérer la paie","Centraliser les informations clients","Créer des visuels marketing","Gérer les stocks"], correct:1},
+      ],
+      vf: [
+        {s:"Le RGPD s'applique uniquement aux entreprises françaises.", v:false, expl:"Il s'applique à toute entreprise traitant des données de résidents de l'UE."},
+        {s:"Le SEO est un référencement payant.", v:false, expl:"Le SEO est le référencement naturel ; le référencement payant, c'est le SEA."},
+        {s:"La méthode SONCAS aide à comprendre les motivations d'achat d'un client.", v:true, expl:"Oui, c'est tout son objectif."},
+        {s:"Un CRM centralise les informations sur les clients.", v:true, expl:"C'est exactement son rôle."},
+      ],
+      estimation: [
+        {q:"Quel est le taux d'ouverture moyen d'un email marketing en France (en %) ?", answer:22, unit:"%", expl:"On considère généralement un taux autour de 20 à 25 %."},
+        {q:"Acquérir un nouveau client coûte en moyenne combien de fois plus cher que fidéliser un client existant ?", answer:5, unit:"fois plus cher", expl:"On estime généralement un facteur d'environ 5."},
+      ],
+      objections: [
+        "C'est trop cher !",
+        "Je vais réfléchir et je vous rappelle.",
+        "Votre concurrent propose moins cher.",
+        "Je n'ai pas le temps maintenant.",
+      ],
+    },
+  },
+};
+
+function loadCourses(){
+  const raw = localStorage.getItem('qf_courses');
+  if(!raw){
+    localStorage.setItem('qf_courses', JSON.stringify([SEED_COURSE]));
+    return [SEED_COURSE];
+  }
+  try{ return JSON.parse(raw); }catch(e){ return [SEED_COURSE]; }
+}
+function saveCourses(courses){ localStorage.setItem('qf_courses', JSON.stringify(courses)); }
+let courses = loadCourses();
+
+function slugify(str){
+  return (str||'cours').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'cours';
+}
+function gameCounts(bank){
+  return { quiz:(bank.quiz||[]).length, vf:(bank.vf||[]).length, estimation:(bank.estimation||[]).length, objections:(bank.objections||[]).length };
+}
 
 /* ============ STATE ============ */
 let roomCode = null;
@@ -39,33 +101,26 @@ let teams = {};
 let answers = {};
 let broadcast = { game:null, phase:'idle', payload:{} };
 let used = { quiz:[], wheel:[], vf:[], estimation:[] };
-let screenName = 'setup';
+let screenName = 'library';
 let wheelActiveTeam = null;
 
-// Sélection en cours (écran "setup") puis active pour la partie en cours
-let setupCourseId = null;
-let setupDifficulty = null;
-let setupGamesEnabled = { quiz:true, vf:true, estimation:true, objections:true };
+let launchCourseId = null;
+let launchDifficulty = null;
+let launchGamesEnabled = { quiz:true, vf:true, estimation:true, objections:true };
 
-let ACTIVE_QUIZ = [];
-let ACTIVE_VF = [];
-let ACTIVE_ESTIMATION = [];
-let ACTIVE_OBJECTIONS = [];
+let ACTIVE_QUIZ = [], ACTIVE_VF = [], ACTIVE_ESTIMATION = [], ACTIVE_OBJECTIONS = [];
 let ACTIVE_GAMES = { quiz:true, vf:true, estimation:true, objections:true };
 let ACTIVE_COURSE_TITLE = '';
 
-function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
+// Formulaire "Ajouter un cours"
+let form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
+  difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
+  games:{quiz:true, vf:true, estimation:true, objections:true},
+  sourceMode:'upload', extractedText:'', extractedFileName:'', extracting:false };
+let generatedPrompt = '';
+let importError = '';
 
-function getCourseById(id){
-  const entry = (window.COURSE_MANIFEST||[]).find(c=>c.id===id);
-  if(!entry) return null;
-  return { entry, data: window[entry.globalVar] };
-}
-function availableDifficulties(courseId){
-  const c = getCourseById(courseId);
-  if(!c || !c.data) return [];
-  return Object.keys(c.data.difficulties||{});
-}
+function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
 
 /* ============ RENDER: SCOREBOARD ============ */
 function renderScoreboard(){
@@ -81,10 +136,337 @@ function renderScoreboard(){
       <span class="tscore">${t.score||0} pts</span>
     </div>`;
   });
-  if(roomCode && screenName!=='setup'){
+  if(roomCode && !['library','addCourse','launch','promptStep'].includes(screenName)){
     html += `<button class="topbar-btn" onclick="goHub()">🏠 Menu</button>`;
   }
+  if(!roomCode && screenName!=='library'){
+    html += `<button class="topbar-btn" onclick="screenName='library'; render();">← Bibliothèque</button>`;
+  }
   sb.innerHTML = html;
+}
+
+/* ============ ROUTER ============ */
+function render(){
+  renderScoreboard();
+  const el = document.getElementById('screen');
+  if(screenName==='library') el.innerHTML = renderLibrary();
+  else if(screenName==='addCourse') el.innerHTML = renderAddCourse();
+  else if(screenName==='promptStep') el.innerHTML = renderPromptStepScreen();
+  else if(screenName==='launch') el.innerHTML = renderLaunch();
+  else if(screenName==='lobby') el.innerHTML = renderLobby();
+  else if(screenName==='hub') el.innerHTML = renderHub();
+  else if(screenName==='quiz') el.innerHTML = renderQuiz();
+  else if(screenName==='wheel') el.innerHTML = renderWheel();
+  else if(screenName==='vf') el.innerHTML = renderVF();
+  else if(screenName==='estimation') el.innerHTML = renderEstimation();
+  else if(screenName==='podium') el.innerHTML = renderPodium();
+}
+
+/* ============ BIBLIOTHÈQUE ============ */
+function renderLibrary(){
+  const cards = courses.map(c=>{
+    const diffRows = Object.entries(c.difficulties||{}).map(([diffKey, bank])=>{
+      const counts = gameCounts(bank);
+      const total = counts.quiz+counts.vf+counts.estimation+counts.objections;
+      return `<div class="diff-row">
+        <span>${DIFFICULTY_LABELS[diffKey]||diffKey} <span class="progress-note">(${total} items)</span></span>
+        <button class="btn coral" style="padding:6px 14px; font-size:0.85rem;" onclick="openLaunch('${c.id}','${diffKey}')">▶ Lancer</button>
+      </div>`;
+    }).join('');
+    return `<div class="lib-card">
+      <div>
+        <span class="qtag">${c.level||'Niveau libre'}</span>
+        ${c.hasOfficialProgram ? `<span class="qtag" style="background:var(--teal-dark); color:#fff;">Référentiel officiel</span>` : ''}
+      </div>
+      <h3>${c.title}</h3>
+      ${c.focusTheme ? `<p class="progress-note">Thème : ${c.focusTheme}</p>` : ''}
+      ${diffRows}
+      <button class="btn secondary" style="margin-top:6px;" onclick="if(confirm('Supprimer ce cours ?')) deleteCourse('${c.id}')">🗑 Supprimer</button>
+    </div>`;
+  }).join('');
+
+  return `
+    <h1 class="title">Ma <span>bibliothèque</span> de cours</h1>
+    <p class="subtitle">${courses.length} cours disponible${courses.length>1?'s':''}</p>
+    <button class="btn" onclick="screenName='addCourse'; render();">+ Ajouter un cours</button>
+    <div class="lib-grid">${cards}</div>
+  `;
+}
+function deleteCourse(id){
+  courses = courses.filter(c=>c.id!==id);
+  saveCourses(courses);
+  render();
+}
+
+/* ============ AJOUTER UN COURS ============ */
+function renderAddCourse(){
+  const diffChecks = Object.keys(DIFFICULTY_LABELS).map(d=>`
+    <div class="checkbox-line">
+      <input type="checkbox" id="d-${d}" ${form.difficulties[d]?'checked':''} onchange="form.difficulties['${d}']=this.checked">
+      <label for="d-${d}" style="margin:0;">${DIFFICULTY_LABELS[d]}</label>
+    </div>`).join('');
+  const gameChecks = Object.keys(GAME_LABELS).map(g=>`
+    <div class="checkbox-line">
+      <input type="checkbox" id="g-${g}" ${form.games[g]?'checked':''} onchange="form.games['${g}']=this.checked">
+      <label for="g-${g}" style="margin:0;">${GAME_LABELS[g]}</label>
+    </div>`).join('');
+
+  return `
+    <h1 class="title">Ajouter un <span>cours</span></h1>
+    <div class="card">
+      <div class="setup-row">
+        <label>Titre du cours</label>
+        <input value="${form.title}" oninput="form.title=this.value" placeholder="Ex : Négociation B2B - Chapitre 3">
+      </div>
+      <div class="setup-row">
+        <label>Classe / niveau des étudiants</label>
+        <input value="${form.level}" oninput="form.level=this.value" placeholder="Ex : Seconde, BTS 1re année, Master 2...">
+      </div>
+      <div class="setup-row">
+        <label>Y a-t-il un référentiel officiel à respecter (RNCP, Éducation nationale) ?</label>
+        <div class="btn-row" style="justify-content:flex-start;">
+          <button class="btn ${form.hasReferential?'':'secondary'}" onclick="form.hasReferential=true; render();">Oui</button>
+          <button class="btn ${!form.hasReferential?'':'secondary'}" onclick="form.hasReferential=false; render();">Non</button>
+        </div>
+      </div>
+      ${form.hasReferential ? `
+      <div class="setup-row">
+        <label>Nom du programme / référentiel</label>
+        <input value="${form.programReference}" oninput="form.programReference=this.value" placeholder="Ex : BTS NDRC - Bloc 2, Programme de SES Terminale...">
+      </div>` : ''}
+      <div class="setup-row">
+        <label>Thématique à privilégier (optionnel)</label>
+        <input value="${form.focusTheme}" oninput="form.focusTheme=this.value" placeholder="Ex : mettre l'accent sur la prospection digitale">
+      </div>
+
+      <div class="setup-row">
+        <label>As-tu un support de cours à donner (PDF, Word, PowerPoint) ?</label>
+        <div class="btn-row" style="justify-content:flex-start;">
+          <button class="btn ${form.sourceMode==='upload'?'':'secondary'}" onclick="form.sourceMode='upload'; render();">Oui, j'ai un fichier</button>
+          <button class="btn ${form.sourceMode==='none'?'':'secondary'}" onclick="form.sourceMode='none'; render();">Non, pas de support</button>
+        </div>
+      </div>
+      ${form.sourceMode==='upload' ? `
+      <div class="setup-row">
+        <input type="file" accept=".pdf,.docx,.pptx" onchange="handleFileSelect(event)">
+        <p class="progress-note">Fichier Pages ou Keynote ? Exporte-le d'abord en PDF, .docx ou .pptx (Fichier → Exporter vers, sur Mac).</p>
+        ${form.extracting ? `<p class="progress-note">⏳ Lecture du fichier en cours…</p>` : ''}
+        ${form.extractedFileName && !form.extracting ? `<p class="progress-note">✔ "${form.extractedFileName}" lu (${form.extractedText.length} caractères)</p>` : ''}
+      </div>` : ''}
+
+      <div class="setup-row">
+        <label>Niveaux de difficulté à générer</label>
+        ${diffChecks}
+      </div>
+      <div class="setup-row">
+        <label>Jeux à inclure</label>
+        ${gameChecks}
+      </div>
+
+      ${importError ? `<p class="error" style="color:var(--coral);">${importError}</p>` : ''}
+      <button class="btn" style="width:100%;" onclick="generatePromptStep()">Générer le texte à copier ➜</button>
+    </div>
+    <button class="btn secondary" onclick="screenName='library'; render();">← Annuler</button>
+  `;
+}
+
+async function handleFileSelect(evt){
+  const file = evt.target.files[0];
+  if(!file) return;
+  form.extracting = true; form.extractedFileName = file.name; render();
+  try{
+    const ext = file.name.toLowerCase().split('.').pop();
+    let text = '';
+    if(ext==='pdf'){
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+      for(let i=1;i<=pdf.numPages;i++){
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        text += content.items.map(it=>it.str).join(' ') + '\n\n';
+      }
+    } else if(ext==='docx'){
+      const buf = await file.arrayBuffer();
+      const result = await mammoth.extractRawText({arrayBuffer:buf});
+      text = result.value;
+    } else if(ext==='pptx'){
+      const buf = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(buf);
+      const slideFiles = Object.keys(zip.files).filter(n=>/^ppt\/slides\/slide\d+\.xml$/.test(n))
+        .sort((a,b)=>parseInt(a.match(/slide(\d+)/)[1])-parseInt(b.match(/slide(\d+)/)[1]));
+      for(const f of slideFiles){
+        const xml = await zip.files[f].async('text');
+        const matches = [...xml.matchAll(/<a:t[^>]*>([^<]*)<\/a:t>/g)];
+        text += matches.map(m=>m[1]).join(' ') + '\n\n';
+      }
+    } else {
+      alert('Format non reconnu. Utilise un PDF, .docx ou .pptx.');
+      form.extracting = false; render(); return;
+    }
+    form.extractedText = text;
+  }catch(e){
+    alert("Erreur de lecture du fichier : " + e.message);
+    form.extractedText = '';
+  }
+  form.extracting = false;
+  render();
+}
+
+function generatePromptStep(){
+  importError = '';
+  if(!form.title.trim()){ importError = 'Merci de donner un titre au cours.'; render(); return; }
+  const diffs = Object.entries(form.difficulties).filter(([,v])=>v).map(([k])=>k);
+  if(diffs.length===0){ importError = 'Sélectionne au moins un niveau de difficulté.'; render(); return; }
+  const games = Object.entries(form.games).filter(([,v])=>v).map(([k])=>k);
+  if(games.length===0){ importError = 'Sélectionne au moins un jeu.'; render(); return; }
+  if(form.sourceMode==='upload' && !form.extractedText){ importError = 'Ajoute un fichier (ou choisis "Non, pas de support").'; render(); return; }
+
+  const id = slugify(form.title);
+  const diffLabels = diffs.map(d=>DIFFICULTY_LABELS[d]).join(', ');
+  const gameLabels = games.map(g=>GAME_LABELS[g]).join(', ');
+
+  let sourceBlock;
+  if(form.sourceMode==='upload'){
+    sourceBlock = `Voici le contenu du cours (extrait automatiquement du fichier) :\n"""\n${form.extractedText.slice(0,40000)}\n"""`;
+  } else if(form.hasReferential){
+    sourceBlock = `Je n'ai pas de support de cours. Utilise ta recherche web pour trouver le référentiel officiel correspondant à : "${form.programReference || form.title}", et base-toi dessus.`;
+  } else {
+    sourceBlock = `Je n'ai pas de support de cours ni de référentiel officiel précis. Base-toi sur tes connaissances générales du sujet suivant : "${form.title}".`;
+  }
+
+  generatedPrompt = `Génère une banque de questions pour l'appli "Quiz Formateurs". Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte avant/après, sans balises markdown, respectant EXACTEMENT cette structure :
+
+{
+  "id": "${id}",
+  "title": "${form.title.replace(/"/g,'\\"')}",
+  "level": "${form.level.replace(/"/g,'\\"')}",
+  "hasOfficialProgram": ${form.hasReferential},
+  "programReference": "${(form.programReference||'').replace(/"/g,'\\"')}",
+  "focusTheme": "${(form.focusTheme||'').replace(/"/g,'\\"')}",
+  "difficulties": {
+    ${diffs.map(d=>`"${d}": { "quiz": [...], "vf": [...], "estimation": [...], "objections": [...] }`).join(',\n    ')}
+  }
+}
+
+Format de chaque tableau (respecte-le à la lettre) :
+- "quiz": [ {"cat": "thème court", "q": "question", "a": ["choix1","choix2","choix3","choix4"], "correct": 0} ]
+- "vf": [ {"s": "affirmation", "v": true, "expl": "explication courte"} ]
+- "estimation": [ {"q": "question demandant un chiffre", "answer": 42, "unit": "%", "expl": "explication"} ]
+- "objections": [ "phrase ou mise en situation orale à traiter face à la classe" ]
+
+Niveaux de difficulté à générer : ${diffLabels} (génère un bloc séparé pour chacun, avec un contenu différent et adapté).
+Jeux à inclure : ${gameLabels} (mets un tableau vide [] pour les jeux non listés ici).
+Niveau des étudiants : ${form.level || 'non précisé'}.
+${form.focusTheme ? `Thématique à privilégier : ${form.focusTheme}.` : ''}
+Génère environ 12 questions "quiz" et 12 "vf", et 8 à 10 éléments pour "estimation"/"objections" par niveau de difficulté activé (adapte intelligemment "estimation" et "objections" à la matière si elle ne s'y prête pas naturellement au premier abord, par exemple une date/durée à estimer, ou une affirmation à contester à l'oral).
+
+${sourceBlock}`;
+
+  screenName = 'promptStep';
+  render();
+}
+
+function renderPromptStepScreen(){
+  return `
+    <h1 class="title">Presque <span>fini</span></h1>
+    <div class="card">
+      <div class="step-line"><span class="step-num">1</span><span>Copie le texte ci-dessous (bouton "Copier")</span></div>
+      <div class="step-line"><span class="step-num">2</span><span>Colle-le dans une conversation avec Claude (claude.ai ou l'appli Claude)</span></div>
+      <div class="step-line"><span class="step-num">3</span><span>Claude te répond avec un résultat — copie SA réponse en entier</span></div>
+      <div class="step-line"><span class="step-num">4</span><span>Reviens ici, colle sa réponse dans la case du bas, puis clique "Importer"</span></div>
+      <textarea class="prompt-box" id="promptBox" readonly>${generatedPrompt}</textarea>
+      <button class="btn" style="width:100%; margin-top:8px;" onclick="copyPrompt()">📋 Copier le texte</button>
+      <div style="height:20px;"></div>
+      <label>Colle ici la réponse de Claude</label>
+      <textarea id="importBox" class="prompt-box" placeholder="Colle ici le JSON renvoyé par Claude..."></textarea>
+      ${importError ? `<p class="error" style="color:var(--coral);">${importError}</p>` : ''}
+      <button class="btn coral" style="width:100%; margin-top:8px;" onclick="importCourse()">Importer dans ma bibliothèque ✔</button>
+    </div>
+    <button class="btn secondary" onclick="screenName='addCourse'; render();">← Retour au formulaire</button>
+  `;
+}
+function copyPrompt(){
+  const box = document.getElementById('promptBox');
+  box.select();
+  navigator.clipboard.writeText(generatedPrompt).then(()=>alert('Copié ! Colle-le maintenant dans une conversation avec Claude.'))
+    .catch(()=>{ document.execCommand('copy'); alert('Copié ! Colle-le maintenant dans une conversation avec Claude.'); });
+}
+function importCourse(){
+  importError = '';
+  const raw = document.getElementById('importBox').value.trim();
+  let parsed;
+  try{
+    const cleaned = raw.replace(/```json|```/g,'').trim();
+    parsed = JSON.parse(cleaned);
+  }catch(e){
+    importError = "Le texte collé n'est pas un JSON valide. Vérifie que tu as bien copié TOUTE la réponse de Claude, sans rien couper.";
+    render(); return;
+  }
+  if(!parsed.id || !parsed.difficulties){
+    importError = "Le JSON ne correspond pas au format attendu (il manque 'id' ou 'difficulties').";
+    render(); return;
+  }
+  const existingIdx = courses.findIndex(c=>c.id===parsed.id);
+  if(existingIdx>=0){
+    courses[existingIdx] = { ...courses[existingIdx], ...parsed,
+      difficulties: { ...courses[existingIdx].difficulties, ...parsed.difficulties } };
+  } else {
+    courses.push(parsed);
+  }
+  saveCourses(courses);
+  form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
+    difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
+    games:{quiz:true, vf:true, estimation:true, objections:true},
+    sourceMode:'upload', extractedText:'', extractedFileName:'', extracting:false };
+  screenName = 'library';
+  render();
+}
+
+/* ============ LANCEMENT (choix des jeux + créer la session) ============ */
+function openLaunch(courseId, difficulty){
+  launchCourseId = courseId;
+  launchDifficulty = difficulty;
+  const course = courses.find(c=>c.id===courseId);
+  const bank = course.difficulties[difficulty];
+  const counts = gameCounts(bank);
+  launchGamesEnabled = { quiz: counts.quiz>0, vf: counts.vf>0, estimation: counts.estimation>0, objections: counts.objections>0 };
+  screenName = 'launch';
+  render();
+}
+function renderLaunch(){
+  const course = courses.find(c=>c.id===launchCourseId);
+  const bank = course.difficulties[launchDifficulty];
+  const counts = gameCounts(bank);
+  const gameChecks = Object.keys(GAME_LABELS).map(g=>{
+    const disabled = counts[g]===0 ? 'disabled' : '';
+    return `<div class="checkbox-line">
+      <input type="checkbox" id="lg-${g}" ${launchGamesEnabled[g]?'checked':''} ${disabled} onchange="launchGamesEnabled['${g}']=this.checked">
+      <label for="lg-${g}" style="margin:0;">${GAME_LABELS[g]} <span class="progress-note">(${counts[g]})</span></label>
+    </div>`;
+  }).join('');
+  return `
+    <h1 class="title">Lancer une <span>séance</span></h1>
+    <div class="card">
+      <p class="progress-note">${course.title} — ${DIFFICULTY_LABELS[launchDifficulty]}</p>
+      <div class="setup-row" style="margin-top:14px;">
+        <label>Jeux activés pour cette séance</label>
+        ${gameChecks}
+      </div>
+      <button class="btn" style="width:100%;" onclick="confirmLaunchAndCreate()">Créer la session ➜</button>
+    </div>
+    <button class="btn secondary" onclick="screenName='library'; render();">← Bibliothèque</button>
+  `;
+}
+function confirmLaunchAndCreate(){
+  const course = courses.find(c=>c.id===launchCourseId);
+  const bank = course.difficulties[launchDifficulty];
+  ACTIVE_QUIZ = bank.quiz || [];
+  ACTIVE_VF = bank.vf || [];
+  ACTIVE_ESTIMATION = bank.estimation || [];
+  ACTIVE_OBJECTIONS = bank.objections || [];
+  ACTIVE_GAMES = { ...launchGamesEnabled };
+  ACTIVE_COURSE_TITLE = course.title + ' — ' + (DIFFICULTY_LABELS[launchDifficulty]||launchDifficulty);
+  createSession();
 }
 
 /* ============ FIREBASE WIRING ============ */
@@ -93,13 +475,11 @@ function createSession(){
   sessionRef = db.ref('qf_sessions/'+roomCode);
   used = { quiz:[], wheel:[], vf:[], estimation:[] };
   sessionRef.set({
-    createdAt: Date.now(),
-    status: 'lobby',
-    broadcast: { game:null, phase:'idle', payload:{} },
-    used
+    createdAt: Date.now(), status: 'lobby',
+    broadcast: { game:null, phase:'idle', payload:{} }, used
   }).then(()=>{
     localStorage.setItem('qf_active_session', JSON.stringify({
-      roomCode, courseId: setupCourseId, difficulty: setupDifficulty, gamesEnabled: ACTIVE_GAMES
+      roomCode, courseId: launchCourseId, difficulty: launchDifficulty, gamesEnabled: ACTIVE_GAMES
     }));
     attachListeners();
     screenName = 'lobby';
@@ -136,80 +516,8 @@ function addScore(teamId, pts){
   sessionRef.child('teams/'+teamId+'/score').set(current + pts);
 }
 
-/* ============ ROUTER ============ */
+/* ============ ROUTER (jeu) ============ */
 function goHub(){ screenName='hub'; pushBroadcast(null, 'idle', {}); render(); }
-function render(){
-  renderScoreboard();
-  const el = document.getElementById('screen');
-  if(screenName==='setup') el.innerHTML = renderSetup();
-  else if(screenName==='lobby') el.innerHTML = renderLobby();
-  else if(screenName==='hub') el.innerHTML = renderHub();
-  else if(screenName==='quiz') el.innerHTML = renderQuiz();
-  else if(screenName==='wheel') el.innerHTML = renderWheel();
-  else if(screenName==='vf') el.innerHTML = renderVF();
-  else if(screenName==='estimation') el.innerHTML = renderEstimation();
-  else if(screenName==='podium') el.innerHTML = renderPodium();
-}
-
-/* ============ SETUP (choix du cours) ============ */
-function renderSetup(){
-  const manifest = window.COURSE_MANIFEST || [];
-  if(!setupCourseId && manifest.length) setupCourseId = manifest[0].id;
-  if(setupCourseId && !setupDifficulty){
-    const diffs = availableDifficulties(setupCourseId);
-    setupDifficulty = diffs[0] || null;
-  }
-  const courseOptions = manifest.map(c=>`<option value="${c.id}" ${c.id===setupCourseId?'selected':''}>${c.title} (${c.level})</option>`).join('');
-  const diffs = availableDifficulties(setupCourseId);
-  const diffOptions = diffs.map(d=>`<option value="${d}" ${d===setupDifficulty?'selected':''}>${DIFFICULTY_LABELS[d]||d}</option>`).join('');
-
-  const bank = setupCourseId && setupDifficulty ? getCourseById(setupCourseId).data.difficulties[setupDifficulty] : null;
-  const gameChecks = ['quiz','vf','estimation','objections'].map(g=>{
-    const count = bank ? (bank[g]||[]).length : 0;
-    const disabled = count===0 ? 'disabled' : '';
-    const checked = setupGamesEnabled[g] && count>0 ? 'checked' : '';
-    return `<div class="checkbox-line">
-      <input type="checkbox" id="game-${g}" ${checked} ${disabled} onchange="setupGamesEnabled['${g}']=this.checked">
-      <label for="game-${g}" style="margin:0;">${GAME_LABELS[g]} <span class="progress-note">(${count})</span></label>
-    </div>`;
-  }).join('');
-
-  if(manifest.length===0){
-    return `<h1 class="title">Quiz <span>Formateurs</span></h1>
-      <div class="card" style="text-align:center;"><p class="progress-note">Aucun cours disponible. Ajoute un fichier dans le dossier "courses/" et déclare-le dans manifest.js (voir README.md).</p></div>`;
-  }
-
-  return `
-    <h1 class="title">Quiz <span>Formateurs</span></h1>
-    <p class="subtitle">Choisis le cours et le niveau de difficulté, puis crée la salle.</p>
-    <div class="card">
-      <div class="setup-row">
-        <label>Cours</label>
-        <select onchange="setupCourseId=this.value; setupDifficulty=null; render();">${courseOptions}</select>
-      </div>
-      <div class="setup-row">
-        <label>Niveau de difficulté</label>
-        <select onchange="setupDifficulty=this.value; render();">${diffOptions}</select>
-      </div>
-      <div class="setup-row">
-        <label>Jeux activés pour cette séance</label>
-        ${gameChecks}
-      </div>
-      <button class="btn" style="width:100%;" onclick="confirmSetupAndCreate()">Créer la session ➜</button>
-    </div>
-  `;
-}
-function confirmSetupAndCreate(){
-  const c = getCourseById(setupCourseId);
-  const bank = c.data.difficulties[setupDifficulty];
-  ACTIVE_QUIZ = bank.quiz || [];
-  ACTIVE_VF = bank.vf || [];
-  ACTIVE_ESTIMATION = bank.estimation || [];
-  ACTIVE_OBJECTIONS = bank.objections || [];
-  ACTIVE_GAMES = { ...setupGamesEnabled };
-  ACTIVE_COURSE_TITLE = c.entry.title + ' — ' + (DIFFICULTY_LABELS[setupDifficulty]||setupDifficulty);
-  createSession();
-}
 
 /* ============ LOBBY ============ */
 function renderLobby(){
@@ -219,7 +527,7 @@ function renderLobby(){
   return `
     <h1 class="title">Salle <span>${roomCode}</span></h1>
     <p class="subtitle">${ACTIVE_COURSE_TITLE}</p>
-    <p class="subtitle qr-hint">Donnez ce code aux équipes. Chacune ouvre la page "équipe" (team.html) sur son appareil, saisit le code + son nom d'équipe.</p>
+    <p class="subtitle qr-hint">Donnez ce code aux équipes. Chacune ouvre "team.html" sur son appareil, saisit le code + son nom d'équipe.</p>
     <div class="card"><div class="live-list">${teamRows}</div></div>
     <button class="btn" onclick="goHub()" ${Object.keys(teams).length===0?'disabled':''}>Démarrer la séance ➜</button>
   `;
@@ -228,24 +536,14 @@ function renderLobby(){
 /* ============ HUB ============ */
 function renderHub(){
   let cards = '';
-  if(ACTIVE_GAMES.quiz && ACTIVE_QUIZ.length){
-    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startQuiz()"><h3>⚡ Quiz Éclair</h3><p class="progress-note">${ACTIVE_QUIZ.length} questions</p></button>`;
-  }
-  if(ACTIVE_GAMES.objections && ACTIVE_OBJECTIONS.length){
-    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startWheel()"><h3>🎡 Mise en situation orale</h3><p class="progress-note">${ACTIVE_OBJECTIONS.length} situations</p></button>`;
-  }
-  if(ACTIVE_GAMES.vf && ACTIVE_VF.length){
-    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startVF()"><h3>✅❌ Vrai/Faux Éclair</h3><p class="progress-note">${ACTIVE_VF.length} affirmations</p></button>`;
-  }
-  if(ACTIVE_GAMES.estimation && ACTIVE_ESTIMATION.length){
-    cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startEstimation()"><h3>🎯 Estimation Chiffrée</h3><p class="progress-note">${ACTIVE_ESTIMATION.length} défis</p></button>`;
-  }
+  if(ACTIVE_GAMES.quiz && ACTIVE_QUIZ.length) cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startQuiz()"><h3>⚡ Quiz Éclair</h3><p class="progress-note">${ACTIVE_QUIZ.length} questions</p></button>`;
+  if(ACTIVE_GAMES.objections && ACTIVE_OBJECTIONS.length) cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startWheel()"><h3>🎡 Mise en situation orale</h3><p class="progress-note">${ACTIVE_OBJECTIONS.length} situations</p></button>`;
+  if(ACTIVE_GAMES.vf && ACTIVE_VF.length) cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startVF()"><h3>✅❌ Vrai/Faux Éclair</h3><p class="progress-note">${ACTIVE_VF.length} affirmations</p></button>`;
+  if(ACTIVE_GAMES.estimation && ACTIVE_ESTIMATION.length) cards += `<button class="card" style="text-align:left; cursor:pointer;" onclick="startEstimation()"><h3>🎯 Estimation Chiffrée</h3><p class="progress-note">${ACTIVE_ESTIMATION.length} défis</p></button>`;
   return `
     <h1 class="title">Choisissez un <span>jeu</span></h1>
     <p class="subtitle">${ACTIVE_COURSE_TITLE}</p>
-    <div class="hub-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; width:100%;">
-      ${cards}
-    </div>
+    <div class="hub-grid" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; width:100%;">${cards}</div>
     <button class="btn secondary" onclick="screenName='podium'; pushBroadcast(null,'podium',{teams}); render();">🏆 Voir le podium</button>
   `;
 }
@@ -259,8 +557,7 @@ function shuffleAnswers(answers, correctIdx){
   }
   return { a: indexed.map(x => x.text), correct: indexed.findIndex(x => x.isCorrect) };
 }
-let currentQuizIdx = null;
-let currentQuizShuffled = null;
+let currentQuizIdx = null, currentQuizShuffled = null;
 function startQuiz(){ screenName='quiz'; currentQuizIdx=null; nextQuizQuestion(); }
 function poolQuiz(){ return ACTIVE_QUIZ.map((q,i)=>i).filter(i=>!(used.quiz||[]).includes(i)); }
 function nextQuizQuestion(){
@@ -271,18 +568,12 @@ function nextQuizQuestion(){
     const q = ACTIVE_QUIZ[currentQuizIdx];
     currentQuizShuffled = shuffleAnswers(q.a, q.correct);
     pushBroadcast('quiz','question',{q:q.q, a:currentQuizShuffled.a, cat:q.cat});
-  } else {
-    currentQuizShuffled = null;
-    pushBroadcast('quiz','done',{});
-  }
+  } else { currentQuizShuffled = null; pushBroadcast('quiz','done',{}); }
   render();
 }
 function revealQuiz(){
-  const q = ACTIVE_QUIZ[currentQuizIdx];
-  const sh = currentQuizShuffled;
-  Object.entries(answers).forEach(([teamId, ans])=>{
-    if(ans && ans.value===sh.correct) addScore(teamId, 1);
-  });
+  const q = ACTIVE_QUIZ[currentQuizIdx]; const sh = currentQuizShuffled;
+  Object.entries(answers).forEach(([teamId, ans])=>{ if(ans && ans.value===sh.correct) addScore(teamId, 1); });
   markUsed('quiz', currentQuizIdx);
   pushBroadcast('quiz','revealed',{q:q.q, a:sh.a, cat:q.cat, correct:sh.correct});
   render();
@@ -296,8 +587,7 @@ function renderQuiz(){
       <button class="btn secondary" onclick="goHub()">← Menu</button>`;
   }
   const q = ACTIVE_QUIZ[currentQuizIdx];
-  const answeredCount = Object.keys(answers).length;
-  const teamCount = Object.keys(teams).length;
+  const answeredCount = Object.keys(answers).length, teamCount = Object.keys(teams).length;
   const revealed = broadcast.phase==='revealed';
   const answersHtml = currentQuizShuffled.a.map((ans,i)=>{
     let cls = 'answer-btn disabled';
@@ -334,9 +624,7 @@ function nextVFQuestion(){
 }
 function revealVF(){
   const item = ACTIVE_VF[currentVFIdx];
-  Object.entries(answers).forEach(([teamId, ans])=>{
-    if(ans && ans.value===item.v) addScore(teamId, 1);
-  });
+  Object.entries(answers).forEach(([teamId, ans])=>{ if(ans && ans.value===item.v) addScore(teamId, 1); });
   markUsed('vf', currentVFIdx);
   pushBroadcast('vf','revealed',{s:item.s, v:item.v, expl:item.expl});
   render();
@@ -350,8 +638,7 @@ function renderVF(){
       <button class="btn secondary" onclick="goHub()">← Menu</button>`;
   }
   const item = ACTIVE_VF[currentVFIdx];
-  const answeredCount = Object.keys(answers).length;
-  const teamCount = Object.keys(teams).length;
+  const answeredCount = Object.keys(answers).length, teamCount = Object.keys(teams).length;
   const revealed = broadcast.phase==='revealed';
   return `
     <h1 class="title">Vrai/Faux <span>Éclair</span></h1>
@@ -376,11 +663,8 @@ function nextEstQuestion(){
   const pool = poolEst();
   currentEstIdx = pool.length ? pool[Math.floor(Math.random()*pool.length)] : null;
   clearAnswers();
-  if(currentEstIdx!==null){
-    pushBroadcast('estimation','question',{q:ACTIVE_ESTIMATION[currentEstIdx].q, unit:ACTIVE_ESTIMATION[currentEstIdx].unit});
-  } else {
-    pushBroadcast('estimation','done',{});
-  }
+  if(currentEstIdx!==null) pushBroadcast('estimation','question',{q:ACTIVE_ESTIMATION[currentEstIdx].q, unit:ACTIVE_ESTIMATION[currentEstIdx].unit});
+  else pushBroadcast('estimation','done',{});
   render();
 }
 function revealEst(){
@@ -407,8 +691,7 @@ function renderEstimation(){
       <button class="btn secondary" onclick="goHub()">← Menu</button>`;
   }
   const item = ACTIVE_ESTIMATION[currentEstIdx];
-  const answeredCount = Object.keys(answers).length;
-  const teamCount = Object.keys(teams).length;
+  const answeredCount = Object.keys(answers).length, teamCount = Object.keys(teams).length;
   const revealed = broadcast.phase==='revealed';
   let rankingHtml = '';
   if(revealed){
@@ -417,8 +700,7 @@ function renderEstimation(){
       .map(([id,a])=>({name:(teams[id]||{}).name||'?', value:a.value, dist:Math.abs(a.value-item.answer)}))
       .sort((a,b)=>a.dist-b.dist);
     rankingHtml = `<div class="live-list" style="margin-top:14px;">` + ranked.map((r,i)=>
-      `<div class="live-row"><span>${i+1}. ${r.name}</span><span>${r.value} ${item.unit}</span></div>`
-    ).join('') + `</div>`;
+      `<div class="live-row"><span>${i+1}. ${r.name}</span><span>${r.value} ${item.unit}</span></div>`).join('') + `</div>`;
   }
   return `
     <h1 class="title">Estimation <span>Chiffrée</span></h1>
@@ -435,13 +717,8 @@ function renderEstimation(){
   `;
 }
 
-/* ============ WHEEL (mise en situation orale) ============ */
-function startWheel(){
-  screenName='wheel';
-  wheelActiveTeam = Object.keys(teams)[0] || null;
-  pushBroadcast('wheel','lobby',{});
-  render();
-}
+/* ============ WHEEL ============ */
+function startWheel(){ screenName='wheel'; wheelActiveTeam = Object.keys(teams)[0] || null; pushBroadcast('wheel','lobby',{}); render(); }
 function poolWheel(){ return ACTIVE_OBJECTIONS.map((o,i)=>i).filter(i=>!(used.wheel||[]).includes(i)); }
 function pickActiveTeam(teamId){ wheelActiveTeam = teamId; render(); }
 function spinWheelTeacher(){
@@ -453,23 +730,14 @@ function spinWheelTeacher(){
   setTimeout(()=>{
     markUsed('wheel', idx);
     const timerEnd = Date.now() + 45000;
-    pushBroadcast('wheel','turn',{
-      activeTeamId: wheelActiveTeam,
-      activeTeamName: teams[wheelActiveTeam].name,
-      objection: ACTIVE_OBJECTIONS[idx],
-      timerEnd
-    });
+    pushBroadcast('wheel','turn',{ activeTeamId: wheelActiveTeam, activeTeamName: teams[wheelActiveTeam].name, objection: ACTIVE_OBJECTIONS[idx], timerEnd });
     render();
   }, 3100);
 }
 function scoreWheel(pts){
   if(!wheelActiveTeam) return;
   addScore(wheelActiveTeam, pts);
-  pushBroadcast('wheel','scored',{
-    activeTeamName: teams[wheelActiveTeam].name,
-    pts,
-    objection: (broadcast.payload && broadcast.payload.objection) || ''
-  });
+  pushBroadcast('wheel','scored',{ activeTeamName: teams[wheelActiveTeam].name, pts, objection: (broadcast.payload && broadcast.payload.objection) || '' });
   render();
 }
 function nextWheelTurn(){
@@ -482,16 +750,14 @@ function nextWheelTurn(){
 function renderWheel(){
   const remaining = poolWheel().length;
   const teamPicks = Object.entries(teams).map(([id,t])=>
-    `<button style="background:${t.color}; ${wheelActiveTeam===id?'outline:3px solid #fff;':''}" onclick="pickActiveTeam('${id}')">${t.name}</button>`
-  ).join('');
-
+    `<button style="background:${t.color}; ${wheelActiveTeam===id?'outline:3px solid #fff;':''}" onclick="pickActiveTeam('${id}')">${t.name}</button>`).join('');
   let body = '';
   if(broadcast.phase==='turn'){
     body = `
-      <div class="objection-reveal" style="text-align:center; font-size:1.3rem; font-weight:700; background:var(--navy3); padding:16px; border-radius:14px;">« ${broadcast.payload.objection} »</div>
+      <div style="text-align:center; font-size:1.3rem; font-weight:700; background:var(--navy3); padding:16px; border-radius:14px;">« ${broadcast.payload.objection} »</div>
       <p class="progress-note">Équipe : <b style="color:var(--gold)">${broadcast.payload.activeTeamName}</b> — réponse à l'oral devant la classe</p>
       <div id="wheelTimer" class="timer-display">45</div>
-      <div class="award-box" style="text-align:center;">
+      <div style="text-align:center;">
         <p class="progress-note">Attribuer les points pour cette réponse :</p>
         <div class="btn-row">
           <button class="btn coral" onclick="scoreWheel(3)">+3 (excellente réponse)</button>
@@ -499,29 +765,18 @@ function renderWheel(){
           <button class="btn secondary" onclick="scoreWheel(1)">+1 (a essayé)</button>
           <button class="btn secondary" onclick="scoreWheel(0)">0</button>
         </div>
-      </div>
-    `;
+      </div>`;
   } else if(broadcast.phase==='scored'){
-    body = `
-      <div class="card" style="text-align:center;">
-        <p class="progress-note">${broadcast.payload.activeTeamName} a reçu <b style="color:var(--gold)">+${broadcast.payload.pts} pt(s)</b> pour : « ${broadcast.payload.objection} »</p>
-      </div>
-      <button class="btn" onclick="nextWheelTurn()">Équipe suivante ➜</button>
-    `;
+    body = `<div class="card" style="text-align:center;"><p class="progress-note">${broadcast.payload.activeTeamName} a reçu <b style="color:var(--gold)">+${broadcast.payload.pts} pt(s)</b></p></div>
+      <button class="btn" onclick="nextWheelTurn()">Équipe suivante ➜</button>`;
   } else {
     body = `
       <p class="progress-note">Choisissez l'équipe qui va être interrogée :</p>
       <div class="team-pick">${teamPicks}</div>
       <div class="wheel-wrap"><div class="pointer"></div><div class="wheel-disc" id="teacherWheelDisc"></div></div>
-      <button class="btn coral" onclick="spinWheelTeacher()" ${remaining===0 || !wheelActiveTeam?'disabled':''}>${remaining===0?'Toutes passées 🎉':'🎡 Tourner la roue'}</button>
-    `;
+      <button class="btn coral" onclick="spinWheelTeacher()" ${remaining===0 || !wheelActiveTeam?'disabled':''}>${remaining===0?'Toutes passées 🎉':'🎡 Tourner la roue'}</button>`;
   }
-  return `
-    <h1 class="title">Mise en <span>situation orale</span></h1>
-    ${body}
-    <p class="progress-note">${remaining} situation(s) restante(s)</p>
-    <button class="btn secondary" onclick="goHub()">← Menu</button>
-  `;
+  return `<h1 class="title">Mise en <span>situation orale</span></h1>${body}<p class="progress-note">${remaining} situation(s) restante(s)</p><button class="btn secondary" onclick="goHub()">← Menu</button>`;
 }
 setInterval(()=>{
   const el = document.getElementById('wheelTimer');
@@ -539,43 +794,31 @@ function renderPodium(){
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'—';
     return `<div class="live-row"><span>${medal} ${t.name}</span><span style="color:var(--gold); font-weight:800;">${t.score||0} pts</span></div>`;
   }).join('');
-  return `
-    <h1 class="title">🏆 Podium <span>final</span></h1>
-    <div class="card"><div class="live-list">${rows}</div></div>
-    <button class="btn secondary" onclick="goHub()">← Menu</button>
-  `;
+  return `<h1 class="title">🏆 Podium <span>final</span></h1><div class="card"><div class="live-list">${rows}</div></div><button class="btn secondary" onclick="goHub()">← Menu</button>`;
 }
 
-/* ============ INIT (reprise après rechargement de page) ============ */
+/* ============ INIT (reprise après rechargement de page pendant une partie) ============ */
 (function init(){
   const saved = localStorage.getItem('qf_active_session');
   if(saved){
     try{
       const s = JSON.parse(saved);
-      const c = getCourseById(s.courseId);
-      if(c && c.data.difficulties[s.difficulty]){
-        const bank = c.data.difficulties[s.difficulty];
-        ACTIVE_QUIZ = bank.quiz || [];
-        ACTIVE_VF = bank.vf || [];
-        ACTIVE_ESTIMATION = bank.estimation || [];
-        ACTIVE_OBJECTIONS = bank.objections || [];
+      const course = courses.find(c=>c.id===s.courseId);
+      if(course && course.difficulties[s.difficulty]){
+        const bank = course.difficulties[s.difficulty];
+        ACTIVE_QUIZ = bank.quiz || []; ACTIVE_VF = bank.vf || [];
+        ACTIVE_ESTIMATION = bank.estimation || []; ACTIVE_OBJECTIONS = bank.objections || [];
         ACTIVE_GAMES = s.gamesEnabled || ACTIVE_GAMES;
-        ACTIVE_COURSE_TITLE = c.entry.title + ' — ' + (DIFFICULTY_LABELS[s.difficulty]||s.difficulty);
+        ACTIVE_COURSE_TITLE = course.title + ' — ' + (DIFFICULTY_LABELS[s.difficulty]||s.difficulty);
         roomCode = s.roomCode;
         sessionRef = db.ref('qf_sessions/'+roomCode);
         sessionRef.once('value').then(snap=>{
-          if(snap.exists()){
-            attachListeners();
-            screenName = 'hub';
-            render();
-          } else {
-            localStorage.removeItem('qf_active_session');
-            render();
-          }
+          if(snap.exists()){ attachListeners(); screenName = 'hub'; render(); }
+          else { localStorage.removeItem('qf_active_session'); render(); }
         });
         return;
       }
-    }catch(e){ /* ignore, on repart de zéro */ }
+    }catch(e){ /* on repart de la bibliothèque */ }
   }
   render();
 })();
