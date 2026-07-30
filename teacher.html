@@ -216,11 +216,11 @@ function renderAddCourse(){
     <div class="card">
       <div class="setup-row">
         <label>Titre du cours</label>
-        <input value="${form.title}" oninput="form.title=this.value" placeholder="Ex : Négociation B2B - Chapitre 3">
+        <input id="titleInput" value="${form.title}" oninput="form.title=this.value" placeholder="Ex : Négociation B2B - Chapitre 3">
       </div>
       <div class="setup-row">
         <label>Classe / niveau des étudiants</label>
-        <input value="${form.level}" oninput="form.level=this.value" placeholder="Ex : Seconde, BTS 1re année, Master 2...">
+        <input id="levelInput" value="${form.level}" oninput="form.level=this.value" placeholder="Ex : Seconde, BTS 1re année, Master 2...">
       </div>
       <div class="setup-row">
         <label>Y a-t-il un référentiel officiel à respecter (RNCP, Éducation nationale) ?</label>
@@ -232,11 +232,11 @@ function renderAddCourse(){
       ${form.hasReferential ? `
       <div class="setup-row">
         <label>Nom du programme / référentiel</label>
-        <input value="${form.programReference}" oninput="form.programReference=this.value" placeholder="Ex : BTS NDRC - Bloc 2, Programme de SES Terminale...">
+        <input id="programInput" value="${form.programReference}" oninput="form.programReference=this.value" placeholder="Ex : BTS NDRC - Bloc 2, Programme de SES Terminale...">
       </div>` : ''}
       <div class="setup-row">
         <label>Thématique à privilégier (optionnel)</label>
-        <input value="${form.focusTheme}" oninput="form.focusTheme=this.value" placeholder="Ex : mettre l'accent sur la prospection digitale">
+        <input id="themeInput" value="${form.focusTheme}" oninput="form.focusTheme=this.value" placeholder="Ex : mettre l'accent sur la prospection digitale">
       </div>
 
       <div class="setup-row">
@@ -314,6 +314,17 @@ async function handleFileSelect(evt){
 
 function generatePromptStep(){
   importError = '';
+  // On relit les champs directement à l'écran, au cas où la valeur mémorisée
+  // aurait pu se désynchroniser (sécurité supplémentaire).
+  const titleEl = document.getElementById('titleInput');
+  const levelEl = document.getElementById('levelInput');
+  const programEl = document.getElementById('programInput');
+  const themeEl = document.getElementById('themeInput');
+  if(titleEl) form.title = titleEl.value;
+  if(levelEl) form.level = levelEl.value;
+  if(programEl) form.programReference = programEl.value;
+  if(themeEl) form.focusTheme = themeEl.value;
+
   if(!form.title.trim()){ importError = 'Merci de donner un titre au cours.'; render(); return; }
   const diffs = Object.entries(form.difficulties).filter(([,v])=>v).map(([k])=>k);
   if(diffs.length===0){ importError = 'Sélectionne au moins un niveau de difficulté.'; render(); return; }
