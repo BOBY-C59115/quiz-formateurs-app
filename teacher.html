@@ -250,8 +250,7 @@ function renderAddCourse(){
       <div class="setup-row">
         <input type="file" accept=".pdf,.docx,.pptx" onchange="handleFileSelect(event)">
         <p class="progress-note">Fichier Pages ou Keynote ? Exporte-le d'abord en PDF, .docx ou .pptx (Fichier → Exporter vers, sur Mac).</p>
-        ${form.extracting ? `<p class="progress-note">⏳ Lecture du fichier en cours…</p>` : ''}
-        ${form.extractedFileName && !form.extracting ? `<p class="progress-note">✔ "${form.extractedFileName}" lu (${form.extractedText.length} caractères)</p>` : ''}
+        <div id="fileStatusArea">${renderFileStatus()}</div>
       </div>` : ''}
 
       <div class="setup-row">
@@ -270,10 +269,21 @@ function renderAddCourse(){
   `;
 }
 
+function renderFileStatus(){
+  if(form.extracting) return `<p class="progress-note">⏳ Lecture du fichier en cours…</p>`;
+  if(form.extractedFileName) return `<p class="progress-note">✔ "${form.extractedFileName}" lu (${form.extractedText.length} caractères)</p>`;
+  return '';
+}
+function updateFileStatusArea(){
+  const el = document.getElementById('fileStatusArea');
+  if(el) el.innerHTML = renderFileStatus();
+}
+
 async function handleFileSelect(evt){
   const file = evt.target.files[0];
   if(!file) return;
-  form.extracting = true; form.extractedFileName = file.name; render();
+  form.extracting = true; form.extractedFileName = file.name;
+  updateFileStatusArea();
   try{
     const ext = file.name.toLowerCase().split('.').pop();
     let text = '';
@@ -301,15 +311,16 @@ async function handleFileSelect(evt){
       }
     } else {
       alert('Format non reconnu. Utilise un PDF, .docx ou .pptx.');
-      form.extracting = false; render(); return;
+      form.extracting = false; updateFileStatusArea(); return;
     }
     form.extractedText = text;
   }catch(e){
+    console.error('Erreur extraction fichier:', e);
     alert("Erreur de lecture du fichier : " + e.message);
     form.extractedText = '';
   }
   form.extracting = false;
-  render();
+  updateFileStatusArea();
 }
 
 function generatePromptStep(){
