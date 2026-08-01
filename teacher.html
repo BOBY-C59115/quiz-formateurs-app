@@ -141,6 +141,7 @@ let form = { title:'', level:'', hasReferential:false, programReference:'', focu
   sourceMode:'upload', extractedText:'', extractedFileName:'', extracting:false };
 let generatedPrompt = '';
 let importError = '';
+let accessCourseId = null; // cours en cours d'édition sur l'écran "Gérer l'accès"
 
 function isAdmin(){ return currentUserProfile && currentUserProfile.role === 'admin'; }
 function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
@@ -182,6 +183,13 @@ auth.onAuthStateChanged(function(user){
   if(user){
     currentUser = user;
     db.ref('users/'+user.uid).on('value', function(snap){
+      if(!snap.exists()){
+        // Fiche de profil manquante (ex : compte créé directement dans la console
+        // Firebase plutôt que via le formulaire de l'appli) -> on la crée automatiquement.
+        const role = user.email && user.email.toLowerCase()===ADMIN_EMAIL ? 'admin' : 'abonne';
+        db.ref('users/'+user.uid).set({ email:user.email, name:'', role, disabled:false, createdAt: Date.now() });
+        return; // ce même listener se redéclenchera avec la fiche fraîchement créée
+      }
       currentUserProfile = snap.val();
       if(currentUserProfile && currentUserProfile.disabled){
         alert("Ce compte a été désactivé par l'administrateur.");
@@ -189,7 +197,7 @@ auth.onAuthStateChanged(function(user){
         return;
       }
       if(!coursesLoaded) attachCoursesListener();
-      if(isAdmin()) db.ref('users').on('value', s=>{ allUsers = s.val() || {}; if(screenName==='adminUsers') render(); });
+      if(isAdmin()) db.ref('users').on('value', s=>{ allUsers = s.val() || {}; if(screenName==='adminUsers' || screenName==='courseAccess') render(); });
       localMigrationAvailable = !!localStorage.getItem('qf_courses');
       if(['authLoading','login','register','forgot'].includes(screenName)) screenName = 'library';
       render();
@@ -230,6 +238,15 @@ function deleteCourse(id){
   if(!isAdmin()){ alert("Seul l'administrateur peut supprimer un cours."); return; }
   db.ref('courses/'+id).remove();
 }
+function setCourseAccessAll(courseId){
+  db.ref('courses/'+courseId+'/access').set('all');
+}
+function setCourseAccessRestricted(courseId){
+  db.ref('courses/'+courseId+'/access').set('restricted');
+}
+function toggleCourseUserAccess(courseId, uid, granted){
+  db.ref('courses/'+courseId+'/allowedUsers/'+uid).set(granted ? true : null);
+}
 
 /* ============ RENDER: SCOREBOARD ============ */
 function renderScoreboard(){
@@ -265,6 +282,7 @@ function render(){
   else if(screenName==='login' || screenName==='register' || screenName==='forgot') el.innerHTML = renderAuthScreen();
   else if(screenName==='account') el.innerHTML = renderAccount();
   else if(screenName==='adminUsers') el.innerHTML = renderAdminUsers();
+  else if(screenName==='courseAccess') el.innerHTML = renderCourseAccess();
   else if(screenName==='library') el.innerHTML = renderLibrary();
   else if(screenName==='addCourse') el.innerHTML = renderAddCourse();
   else if(screenName==='promptStep') el.innerHTML = renderPromptStepScreen();
@@ -385,6 +403,40 @@ function toggleUserRole(uid, currentRole){
   db.ref('users/'+uid+'/role').set(next);
 }
 
+/* ============ GESTION DE L'ACCÈS À UN COURS (admin) ============ */
+function renderCourseAccess(){
+  const course = courses.find(c=>c.id===accessCourseId);
+  if(!course) return `<main class="wizard"><p class="error">Cours introuvable.</p><button class="btn secondary" onclick="screenName='library'; render();">← Bibliothèque</button></main>`;
+  const isRestricted = course.access === 'restricted';
+  const abonnes = Object.entries(allUsers).filter(([,u])=>u.email !== ADMIN_EMAIL && u.role !== 'admin');
+  const allowedUsers = course.allowedUsers || {};
+
+  const userRows = abonnes.map(([uid, u])=>`
+    <div class="checkbox-line ${allowedUsers[uid]?'is-checked':''}">
+      <input type="checkbox" id="access-${uid}" ${allowedUsers[uid]?'checked':''} onchange="toggleCourseUserAccess('${course.id}','${uid}', this.checked)">
+      <label for="access-${uid}" style="margin:0;">${u.name || u.email}</label>
+    </div>`).join('');
+
+  return `
+    <main class="wizard">
+    <h1 class="title">Accès au <span>cours</span></h1>
+    <div class="card">
+      <p class="progress-note" style="margin-bottom:14px;">${course.title}</p>
+      <div class="btn-row" style="justify-content:flex-start;">
+        <button class="btn ${!isRestricted?'':'secondary'}" onclick="setCourseAccessAll('${course.id}')">Ouvert à tous les abonnés</button>
+        <button class="btn ${isRestricted?'':'secondary'}" onclick="setCourseAccessRestricted('${course.id}')">Restreint à certains abonnés</button>
+      </div>
+      ${isRestricted ? `
+        <div style="margin-top:16px;">
+          <label>Abonnés autorisés pour ce cours</label>
+          ${userRows || `<p class="progress-note">Aucun abonné pour l'instant.</p>`}
+        </div>` : `<p class="progress-note" style="margin-top:14px;">Tous les abonnés (non-administrateurs) voient ce cours dans leur bibliothèque.</p>`}
+    </div>
+    <button class="btn secondary" onclick="screenName='library'; render();">← Bibliothèque</button>
+    </main>
+  `;
+}
+
 /* ============ BIBLIOTHÈQUE ============ */
 function renderLibrary(){
   const migrationBanner = localMigrationAvailable && isAdmin() ? `
@@ -406,11 +458,15 @@ function renderLibrary(){
       <div>
         <span class="qtag">${c.level||'Niveau libre'}</span>
         ${c.hasOfficialProgram ? `<span class="qtag" style="background:var(--teal-dark); color:#fff;">Référentiel officiel</span>` : ''}
+        ${isAdmin() && c.access==='restricted' ? `<span class="qtag" style="background:var(--coral-dark); color:#fff;">Accès restreint</span>` : ''}
       </div>
       <h3>${c.title}</h3>
       ${c.focusTheme ? `<p class="progress-note">Thème : ${c.focusTheme}</p>` : ''}
       ${diffRows}
-      ${isAdmin() ? `<button class="btn secondary" style="margin-top:6px;" onclick="if(confirm('Supprimer ce cours ?')) deleteCourse('${c.id}')">🗑 Supprimer</button>` : ''}
+      ${isAdmin() ? `<div class="btn-row" style="justify-content:flex-start; margin-top:6px;">
+        <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="accessCourseId='${c.id}'; screenName='courseAccess'; render();">🔒 Gérer l'accès</button>
+        <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="if(confirm('Supprimer ce cours ?')) deleteCourse('${c.id}')">🗑 Supprimer</button>
+      </div>` : ''}
     </div>`;
   }).join('');
 
@@ -661,7 +717,7 @@ function importCourse(){
   const existing = courses.find(c=>c.id===parsed.id);
   const merged = existing
     ? { ...existing, ...parsed, difficulties: { ...existing.difficulties, ...parsed.difficulties } }
-    : parsed;
+    : { access: 'all', allowedUsers: {}, ...parsed };
   db.ref('courses/'+parsed.id).set(merged);
   form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
     difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
