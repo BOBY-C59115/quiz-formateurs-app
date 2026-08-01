@@ -21,6 +21,11 @@
   textarea.prompt-box{min-height:220px; font-family:monospace; font-size:0.82rem;}
   .step-num{display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; border-radius:50%; background:var(--teal); color:#08201B; font-weight:800; margin-right:8px; flex-shrink:0;}
   .step-line{display:flex; align-items:flex-start; gap:4px; margin-bottom:14px;}
+  .user-row{display:flex; align-items:center; justify-content:space-between; background:#0F1E38; border-radius:10px; padding:10px 14px; margin-top:8px; flex-wrap:wrap; gap:8px;}
+  .role-tag{font-size:0.72rem; font-weight:800; text-transform:uppercase; padding:3px 10px; border-radius:999px;}
+  .role-tag.admin{background:var(--gold); color:#2B1E00;}
+  .role-tag.abonne{background:var(--navy3); color:var(--cream);}
+  .role-tag.disabled{background:var(--coral-dark); color:#fff;}
 </style>
 </head>
 <body>
@@ -29,6 +34,7 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="firebase-config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
@@ -36,10 +42,13 @@
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
+const auth = firebase.auth();
+const ADMIN_EMAIL = 'davidcornil59@gmail.com';
+
 const DIFFICULTY_LABELS = { basique:'Basique', confirme:'Confirmé', expert:'Expert', consultant_junior:'Consultant junior' };
 const GAME_LABELS = { quiz:'Quiz à choix multiples', vf:'Vrai / Faux', estimation:'Estimation chiffrée', objections:'Mise en situation orale' };
 
-/* ============ BIBLIOTHÈQUE DE COURS (stockée dans ce navigateur) ============ */
+/* ============ EXEMPLE DE COURS (utilisé pour amorcer la bibliothèque si elle est vide) ============ */
 const SEED_COURSE = {
   id: 'ndrc-relation-client',
   title: 'BTS NDRC — Relation client à distance et digitalisation',
@@ -78,32 +87,44 @@ const SEED_COURSE = {
   },
 };
 
-function loadCourses(){
-  const raw = localStorage.getItem('qf_courses');
-  if(!raw){
-    localStorage.setItem('qf_courses', JSON.stringify([SEED_COURSE]));
-    return [SEED_COURSE];
-  }
-  try{ return JSON.parse(raw); }catch(e){ return [SEED_COURSE]; }
-}
-function saveCourses(courses){ localStorage.setItem('qf_courses', JSON.stringify(courses)); }
-let courses = loadCourses();
-
 function slugify(str){
   return (str||'cours').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'cours';
 }
 function gameCounts(bank){
   return { quiz:(bank.quiz||[]).length, vf:(bank.vf||[]).length, estimation:(bank.estimation||[]).length, objections:(bank.objections||[]).length };
 }
+function translateAuthError(err){
+  const map = {
+    'auth/email-already-in-use': 'Cet email a déjà un compte. Essaie plutôt de te connecter.',
+    'auth/invalid-email': 'Adresse email invalide.',
+    'auth/weak-password': 'Le mot de passe doit faire au moins 6 caractères.',
+    'auth/wrong-password': 'Mot de passe incorrect.',
+    'auth/user-not-found': 'Aucun compte avec cet email.',
+    'auth/too-many-requests': 'Trop de tentatives. Réessaie dans quelques minutes.',
+    'auth/requires-recent-login': 'Merci de te reconnecter puis de réessayer.',
+  };
+  return map[err.code] || err.message;
+}
 
-/* ============ STATE ============ */
+/* ============ ÉTAT GLOBAL ============ */
+let currentUser = null;         // objet Firebase Auth
+let currentUserProfile = null;  // { email, name, role, disabled } depuis la base
+let authScreenMode = 'login';   // 'login' | 'register' | 'forgot'
+let authError = '';
+let authBusy = false;
+
+let allUsers = {};               // uid -> profil (pour l'écran admin)
+let courses = [];
+let coursesLoaded = false;
+let localMigrationAvailable = false;
+
 let roomCode = null;
 let sessionRef = null;
 let teams = {};
 let answers = {};
 let broadcast = { game:null, phase:'idle', payload:{} };
 let used = { quiz:[], wheel:[], vf:[], estimation:[] };
-let screenName = 'library';
+let screenName = 'authLoading';
 let wheelActiveTeam = null;
 
 let launchCourseId = null;
@@ -114,7 +135,6 @@ let ACTIVE_QUIZ = [], ACTIVE_VF = [], ACTIVE_ESTIMATION = [], ACTIVE_OBJECTIONS 
 let ACTIVE_GAMES = { quiz:true, vf:true, estimation:true, objections:true };
 let ACTIVE_COURSE_TITLE = '';
 
-// Formulaire "Ajouter un cours"
 let form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
   difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
   games:{quiz:true, vf:true, estimation:true, objections:true},
@@ -122,7 +142,94 @@ let form = { title:'', level:'', hasReferential:false, programReference:'', focu
 let generatedPrompt = '';
 let importError = '';
 
+function isAdmin(){ return currentUserProfile && currentUserProfile.role === 'admin'; }
 function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
+
+/* ============ AUTHENTIFICATION ============ */
+function doRegister(email, password, name, rememberMe){
+  authError = ''; authBusy = true; render();
+  const persistence = rememberMe ? firebase.auth.Auth.Persistence.LOCAL : firebase.auth.Auth.Persistence.SESSION;
+  auth.setPersistence(persistence)
+    .then(()=>auth.createUserWithEmailAndPassword(email, password))
+    .then(cred=>{
+      const role = email.toLowerCase()===ADMIN_EMAIL ? 'admin' : 'abonne';
+      return db.ref('users/'+cred.user.uid).set({ email, name: name||'', role, disabled:false, createdAt: Date.now() });
+    })
+    .catch(err=>{ authError = translateAuthError(err); authBusy = false; render(); });
+}
+function doLogin(email, password, rememberMe){
+  authError = ''; authBusy = true; render();
+  const persistence = rememberMe ? firebase.auth.Auth.Persistence.LOCAL : firebase.auth.Auth.Persistence.SESSION;
+  auth.setPersistence(persistence)
+    .then(()=>auth.signInWithEmailAndPassword(email, password))
+    .catch(err=>{ authError = translateAuthError(err); authBusy = false; render(); });
+}
+function doForgotPassword(email){
+  authError = ''; authBusy = true; render();
+  auth.sendPasswordResetEmail(email)
+    .then(()=>{ authBusy = false; alert("Email envoyé ! Vérifie ta boîte de réception (et les spams)."); authScreenMode='login'; render(); })
+    .catch(err=>{ authError = translateAuthError(err); authBusy = false; render(); });
+}
+function doLogout(){ auth.signOut(); }
+function doChangePassword(newPassword){
+  if(newPassword.length < 6){ alert('Le mot de passe doit faire au moins 6 caractères.'); return; }
+  currentUser.updatePassword(newPassword)
+    .then(()=>alert('Mot de passe modifié avec succès.'))
+    .catch(err=>alert('Erreur : ' + translateAuthError(err)));
+}
+
+auth.onAuthStateChanged(function(user){
+  if(user){
+    currentUser = user;
+    db.ref('users/'+user.uid).on('value', function(snap){
+      currentUserProfile = snap.val();
+      if(currentUserProfile && currentUserProfile.disabled){
+        alert("Ce compte a été désactivé par l'administrateur.");
+        auth.signOut();
+        return;
+      }
+      if(!coursesLoaded) attachCoursesListener();
+      if(isAdmin()) db.ref('users').on('value', s=>{ allUsers = s.val() || {}; if(screenName==='adminUsers') render(); });
+      localMigrationAvailable = !!localStorage.getItem('qf_courses');
+      if(['authLoading','login','register','forgot'].includes(screenName)) screenName = 'library';
+      render();
+    });
+  } else {
+    currentUser = null; currentUserProfile = null;
+    screenName = 'login';
+    render();
+  }
+});
+
+/* ============ BIBLIOTHÈQUE DE COURS (Firebase, partagée) ============ */
+function attachCoursesListener(){
+  coursesLoaded = true;
+  db.ref('courses').on('value', function(snap){
+    const val = snap.val();
+    if(!val && isAdmin()){
+      db.ref('courses/'+SEED_COURSE.id).set(SEED_COURSE);
+      return;
+    }
+    courses = Object.values(val || {});
+    if(screenName==='library') render();
+  });
+}
+function migrateLocalCourses(){
+  const raw = localStorage.getItem('qf_courses');
+  if(!raw) return;
+  try{
+    const localCourses = JSON.parse(raw);
+    localCourses.forEach(c=>db.ref('courses/'+c.id).set(c));
+    localStorage.removeItem('qf_courses');
+    localMigrationAvailable = false;
+    alert('Cours importés dans la bibliothèque partagée !');
+    render();
+  }catch(e){ alert('Erreur pendant la migration : ' + e.message); }
+}
+function deleteCourse(id){
+  if(!isAdmin()){ alert("Seul l'administrateur peut supprimer un cours."); return; }
+  db.ref('courses/'+id).remove();
+}
 
 /* ============ RENDER: SCOREBOARD ============ */
 function renderScoreboard(){
@@ -138,11 +245,14 @@ function renderScoreboard(){
       <span class="tscore">${t.score||0} pts</span>
     </div>`;
   });
-  if(roomCode && !['library','addCourse','launch','promptStep'].includes(screenName)){
+  if(roomCode && !['library','addCourse','launch','promptStep','account','adminUsers'].includes(screenName)){
     html += `<button class="topbar-btn" onclick="goHub()">🏠 Menu</button>`;
   }
-  if(!roomCode && screenName!=='library'){
-    html += `<button class="topbar-btn" onclick="screenName='library'; render();">← Bibliothèque</button>`;
+  if(currentUser && !roomCode){
+    if(screenName!=='library') html += `<button class="topbar-btn" onclick="screenName='library'; render();">← Bibliothèque</button>`;
+    if(isAdmin()) html += `<button class="topbar-btn" onclick="screenName='adminUsers'; render();">👥 Abonnés</button>`;
+    html += `<button class="topbar-btn" onclick="screenName='account'; render();">⚙️ Mon compte</button>`;
+    html += `<button class="topbar-btn" onclick="doLogout()">Déconnexion</button>`;
   }
   sb.innerHTML = html;
 }
@@ -151,7 +261,11 @@ function renderScoreboard(){
 function render(){
   renderScoreboard();
   const el = document.getElementById('screen');
-  if(screenName==='library') el.innerHTML = renderLibrary();
+  if(screenName==='authLoading') el.innerHTML = `<p class="status-note" style="text-align:center;">Chargement…</p>`;
+  else if(screenName==='login' || screenName==='register' || screenName==='forgot') el.innerHTML = renderAuthScreen();
+  else if(screenName==='account') el.innerHTML = renderAccount();
+  else if(screenName==='adminUsers') el.innerHTML = renderAdminUsers();
+  else if(screenName==='library') el.innerHTML = renderLibrary();
   else if(screenName==='addCourse') el.innerHTML = renderAddCourse();
   else if(screenName==='promptStep') el.innerHTML = renderPromptStepScreen();
   else if(screenName==='launch') el.innerHTML = renderLaunch();
@@ -164,8 +278,121 @@ function render(){
   else if(screenName==='podium') el.innerHTML = renderPodium();
 }
 
+/* ============ ÉCRANS D'AUTHENTIFICATION ============ */
+function renderAuthScreen(){
+  if(authScreenMode==='forgot'){
+    return `
+      <main class="auth-screen" style="min-height:auto; padding:0;">
+      <div class="card" style="max-width:420px; margin:40px auto;">
+        <h1 class="title">Mot de passe <span>oublié</span></h1>
+        <label>Ton email</label>
+        <input id="forgotEmail" type="email" placeholder="ton@email.com">
+        ${authError ? `<p class="error">${authError}</p>` : ''}
+        <button class="btn" style="width:100%;" ${authBusy?'disabled':''} onclick="doForgotPassword(document.getElementById('forgotEmail').value.trim())">
+          ${authBusy?'Envoi en cours…':'Recevoir un email de récupération'}
+        </button>
+        <button class="btn secondary" style="width:100%; margin-top:10px;" onclick="authScreenMode='login'; authError=''; render();">← Retour à la connexion</button>
+      </div>
+      </main>`;
+  }
+
+  const isRegister = authScreenMode==='register';
+  return `
+    <main class="auth-screen" style="min-height:auto; padding:0;">
+    <div class="card" style="max-width:420px; margin:40px auto;">
+      <h1 class="title">Quiz <span>Formateurs</span></h1>
+      <p class="subtitle" style="margin-bottom:16px;">Espace formateur — connexion requise.</p>
+      <div class="btn-row">
+        <button class="btn ${!isRegister?'':'secondary'}" onclick="authScreenMode='login'; authError=''; render();">Connexion</button>
+        <button class="btn ${isRegister?'':'secondary'}" onclick="authScreenMode='register'; authError=''; render();">Créer un compte</button>
+      </div>
+      ${isRegister ? `
+      <label>Ton nom</label>
+      <input id="authName" placeholder="Ton nom">` : ''}
+      <label>Email</label>
+      <input id="authEmail" type="email" placeholder="ton@email.com">
+      <label>Mot de passe</label>
+      <input id="authPassword" type="password" placeholder="••••••••">
+      <div class="checkbox-line">
+        <input type="checkbox" id="rememberMe" checked>
+        <label for="rememberMe" style="margin:0;">Se souvenir de moi sur cet appareil</label>
+      </div>
+      ${authError ? `<p class="error">${authError}</p>` : ''}
+      <button class="btn" style="width:100%; margin-top:8px;" ${authBusy?'disabled':''} onclick="submitAuthForm()">
+        ${authBusy ? 'Un instant…' : (isRegister ? 'Créer le compte' : 'Se connecter')}
+      </button>
+      ${!isRegister ? `<button class="btn secondary" style="width:100%; margin-top:8px;" onclick="authScreenMode='forgot'; authError=''; render();">Mot de passe oublié ?</button>` : ''}
+    </div>
+    </main>`;
+}
+function submitAuthForm(){
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const rememberMe = document.getElementById('rememberMe').checked;
+  if(!email || !password){ authError = 'Merci de remplir email et mot de passe.'; render(); return; }
+  if(authScreenMode==='register'){
+    const name = document.getElementById('authName').value.trim();
+    doRegister(email, password, name, rememberMe);
+  } else {
+    doLogin(email, password, rememberMe);
+  }
+}
+
+/* ============ MON COMPTE ============ */
+function renderAccount(){
+  return `
+    <main class="wizard" style="max-width:480px;">
+    <h1 class="title">Mon <span>compte</span></h1>
+    <div class="card">
+      <p class="progress-note">Email : <b style="color:var(--cream)">${currentUserProfile.email}</b></p>
+      <p class="progress-note">Rôle : <span class="role-tag ${currentUserProfile.role}">${currentUserProfile.role==='admin'?'Administrateur':'Abonné'}</span></p>
+      <div style="height:16px;"></div>
+      <label>Nouveau mot de passe</label>
+      <input id="newPassword" type="password" placeholder="Au moins 6 caractères">
+      <button class="btn" style="width:100%;" onclick="doChangePassword(document.getElementById('newPassword').value)">Changer le mot de passe</button>
+    </div>
+    </main>`;
+}
+
+/* ============ GESTION DES ABONNÉS (admin) ============ */
+function renderAdminUsers(){
+  const rows = Object.entries(allUsers).map(([uid, u])=>{
+    if(u.email === ADMIN_EMAIL) return ''; // ne pas afficher l'admin principal ici
+    return `<div class="user-row">
+      <div>
+        <div>${u.name || u.email}</div>
+        <div class="progress-note">${u.email}</div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <span class="role-tag ${u.disabled ? 'disabled' : u.role}">${u.disabled ? 'Désactivé' : (u.role==='admin'?'Administrateur':'Abonné')}</span>
+        <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserRole('${uid}','${u.role}')">${u.role==='admin' ? 'Rétrograder' : 'Promouvoir admin'}</button>
+        <button class="btn ${u.disabled?'':'coral'}" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserDisabled('${uid}', ${!!u.disabled})">${u.disabled ? 'Réactiver' : 'Désactiver'}</button>
+      </div>
+    </div>`;
+  }).join('');
+  return `
+    <main class="wizard" style="max-width:700px;">
+    <h1 class="title">Gestion des <span>abonnés</span></h1>
+    <p class="subtitle">Désactiver un compte bloque immédiatement sa connexion. Une suppression totale et définitive nécessiterait un petit serveur (à voir plus tard si besoin).</p>
+    <div class="card">
+      ${rows || `<p class="progress-note">Aucun abonné pour l'instant.</p>`}
+    </div>
+    </main>`;
+}
+function toggleUserDisabled(uid, current){ db.ref('users/'+uid+'/disabled').set(!current); }
+function toggleUserRole(uid, currentRole){
+  const next = currentRole==='admin' ? 'abonne' : 'admin';
+  db.ref('users/'+uid+'/role').set(next);
+}
+
 /* ============ BIBLIOTHÈQUE ============ */
 function renderLibrary(){
+  const migrationBanner = localMigrationAvailable && isAdmin() ? `
+    <div class="card" style="margin-bottom:16px; text-align:center;">
+      <p class="progress-note">Des cours créés avec l'ancienne version (stockés sur cet appareil) ont été trouvés.</p>
+      <button class="btn gold" onclick="migrateLocalCourses()">Importer ces cours dans la bibliothèque partagée</button>
+    </div>` : '';
+
   const cards = courses.map(c=>{
     const diffRows = Object.entries(c.difficulties||{}).map(([diffKey, bank])=>{
       const counts = gameCounts(bank);
@@ -183,25 +410,24 @@ function renderLibrary(){
       <h3>${c.title}</h3>
       ${c.focusTheme ? `<p class="progress-note">Thème : ${c.focusTheme}</p>` : ''}
       ${diffRows}
-      <button class="btn secondary" style="margin-top:6px;" onclick="if(confirm('Supprimer ce cours ?')) deleteCourse('${c.id}')">🗑 Supprimer</button>
+      ${isAdmin() ? `<button class="btn secondary" style="margin-top:6px;" onclick="if(confirm('Supprimer ce cours ?')) deleteCourse('${c.id}')">🗑 Supprimer</button>` : ''}
     </div>`;
   }).join('');
 
   return `
+    <main class="dashboard">
     <h1 class="title">Ma <span>bibliothèque</span> de cours</h1>
-    <p class="subtitle">${courses.length} cours disponible${courses.length>1?'s':''}</p>
-    <button class="btn" onclick="screenName='addCourse'; render();">+ Ajouter un cours</button>
-    <div class="lib-grid">${cards}</div>
+    <p class="subtitle">${courses.length} cours disponible${courses.length>1?'s':''} — partagée entre tous les comptes</p>
+    ${migrationBanner}
+    ${isAdmin() ? `<button class="btn" onclick="screenName='addCourse'; render();">+ Ajouter un cours</button>` : ''}
+    <div class="lib-grid" style="margin-top:16px;">${cards}</div>
+    </main>
   `;
 }
-function deleteCourse(id){
-  courses = courses.filter(c=>c.id!==id);
-  saveCourses(courses);
-  render();
-}
 
-/* ============ AJOUTER UN COURS ============ */
+/* ============ AJOUTER UN COURS (admin uniquement) ============ */
 function renderAddCourse(){
+  if(!isAdmin()) return `<main class="wizard"><p class="error">Seul l'administrateur peut ajouter un cours.</p></main>`;
   const diffChecks = Object.keys(DIFFICULTY_LABELS).map(d=>`
     <div class="checkbox-line ${form.difficulties[d]?'is-checked':''}">
       <input type="checkbox" id="d-${d}" ${form.difficulties[d]?'checked':''} onchange="form.difficulties['${d}']=this.checked; render();">
@@ -214,6 +440,7 @@ function renderAddCourse(){
     </div>`).join('');
 
   return `
+    <main class="wizard">
     <h1 class="title">Ajouter un <span>cours</span></h1>
     <div class="card">
       <div class="setup-row">
@@ -264,10 +491,11 @@ function renderAddCourse(){
         ${gameChecks}
       </div>
 
-      ${importError ? `<p class="error" style="color:var(--coral);">${importError}</p>` : ''}
+      ${importError ? `<p class="error">${importError}</p>` : ''}
       <button class="btn" style="width:100%;" onclick="generatePromptStep()">Générer le texte à copier ➜</button>
     </div>
     <button class="btn secondary" onclick="screenName='library'; render();">← Annuler</button>
+    </main>
   `;
 }
 
@@ -327,8 +555,6 @@ async function handleFileSelect(evt){
 
 function generatePromptStep(){
   importError = '';
-  // On relit les champs directement à l'écran, au cas où la valeur mémorisée
-  // aurait pu se désynchroniser (sécurité supplémentaire).
   const titleEl = document.getElementById('titleInput');
   const levelEl = document.getElementById('levelInput');
   const programEl = document.getElementById('programInput');
@@ -392,6 +618,7 @@ ${sourceBlock}`;
 
 function renderPromptStepScreen(){
   return `
+    <main class="wizard">
     <h1 class="title">Presque <span>fini</span></h1>
     <div class="card">
       <div class="step-line"><span class="step-num">1</span><span>Copie le texte ci-dessous (bouton "Copier")</span></div>
@@ -403,10 +630,11 @@ function renderPromptStepScreen(){
       <div style="height:20px;"></div>
       <label>Colle ici la réponse de Claude</label>
       <textarea id="importBox" class="prompt-box" placeholder="Colle ici le JSON renvoyé par Claude..."></textarea>
-      ${importError ? `<p class="error" style="color:var(--coral);">${importError}</p>` : ''}
-      <button class="btn coral" style="width:100%; margin-top:8px;" onclick="importCourse()">Importer dans ma bibliothèque ✔</button>
+      ${importError ? `<p class="error">${importError}</p>` : ''}
+      <button class="btn coral" style="width:100%; margin-top:8px;" onclick="importCourse()">Importer dans la bibliothèque ✔</button>
     </div>
     <button class="btn secondary" onclick="screenName='addCourse'; render();">← Retour au formulaire</button>
+    </main>
   `;
 }
 function copyPrompt(){
@@ -430,14 +658,11 @@ function importCourse(){
     importError = "Le JSON ne correspond pas au format attendu (il manque 'id' ou 'difficulties').";
     render(); return;
   }
-  const existingIdx = courses.findIndex(c=>c.id===parsed.id);
-  if(existingIdx>=0){
-    courses[existingIdx] = { ...courses[existingIdx], ...parsed,
-      difficulties: { ...courses[existingIdx].difficulties, ...parsed.difficulties } };
-  } else {
-    courses.push(parsed);
-  }
-  saveCourses(courses);
+  const existing = courses.find(c=>c.id===parsed.id);
+  const merged = existing
+    ? { ...existing, ...parsed, difficulties: { ...existing.difficulties, ...parsed.difficulties } }
+    : parsed;
+  db.ref('courses/'+parsed.id).set(merged);
   form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
     difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
     games:{quiz:true, vf:true, estimation:true, objections:true},
@@ -469,6 +694,7 @@ function renderLaunch(){
     </div>`;
   }).join('');
   return `
+    <main class="wizard">
     <h1 class="title">Lancer une <span>séance</span></h1>
     <div class="card">
       <p class="progress-note">${course.title} — ${DIFFICULTY_LABELS[launchDifficulty]}</p>
@@ -479,6 +705,7 @@ function renderLaunch(){
       <button class="btn" style="width:100%;" onclick="confirmLaunchAndCreate()">Créer la session ➜</button>
     </div>
     <button class="btn secondary" onclick="screenName='library'; render();">← Bibliothèque</button>
+    </main>
   `;
 }
 function confirmLaunchAndCreate(){
@@ -493,7 +720,7 @@ function confirmLaunchAndCreate(){
   createSession();
 }
 
-/* ============ FIREBASE WIRING ============ */
+/* ============ FIREBASE WIRING (jeu en direct) ============ */
 function createSession(){
   roomCode = genCode();
   sessionRef = db.ref('qf_sessions/'+roomCode);
@@ -502,15 +729,12 @@ function createSession(){
     createdAt: Date.now(), status: 'lobby',
     broadcast: { game:null, phase:'idle', payload:{} }, used
   }).then(()=>{
-    localStorage.setItem('qf_active_session', JSON.stringify({
-      roomCode, courseId: launchCourseId, difficulty: launchDifficulty, gamesEnabled: ACTIVE_GAMES
-    }));
-    attachListeners();
+    attachGameListeners();
     screenName = 'lobby';
     render();
   });
 }
-function attachListeners(){
+function attachGameListeners(){
   sessionRef.child('teams').on('value', snap=>{
     teams = snap.val() || {};
     renderScoreboard();
@@ -821,31 +1045,7 @@ function renderPodium(){
   return `<h1 class="title">🏆 Podium <span>final</span></h1><div class="card"><div class="live-list">${rows}</div></div><button class="btn secondary" onclick="goHub()">← Menu</button>`;
 }
 
-/* ============ INIT (reprise après rechargement de page pendant une partie) ============ */
-(function init(){
-  const saved = localStorage.getItem('qf_active_session');
-  if(saved){
-    try{
-      const s = JSON.parse(saved);
-      const course = courses.find(c=>c.id===s.courseId);
-      if(course && course.difficulties[s.difficulty]){
-        const bank = course.difficulties[s.difficulty];
-        ACTIVE_QUIZ = bank.quiz || []; ACTIVE_VF = bank.vf || [];
-        ACTIVE_ESTIMATION = bank.estimation || []; ACTIVE_OBJECTIONS = bank.objections || [];
-        ACTIVE_GAMES = s.gamesEnabled || ACTIVE_GAMES;
-        ACTIVE_COURSE_TITLE = course.title + ' — ' + (DIFFICULTY_LABELS[s.difficulty]||s.difficulty);
-        roomCode = s.roomCode;
-        sessionRef = db.ref('qf_sessions/'+roomCode);
-        sessionRef.once('value').then(snap=>{
-          if(snap.exists()){ attachListeners(); screenName = 'hub'; render(); }
-          else { localStorage.removeItem('qf_active_session'); render(); }
-        });
-        return;
-      }
-    }catch(e){ /* on repart de la bibliothèque */ }
-  }
-  render();
-})();
+render();
 </script>
 </body>
 </html>
