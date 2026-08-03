@@ -39,6 +39,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -135,13 +136,16 @@ let ACTIVE_QUIZ = [], ACTIVE_VF = [], ACTIVE_ESTIMATION = [], ACTIVE_OBJECTIONS 
 let ACTIVE_GAMES = { quiz:true, vf:true, estimation:true, objections:true };
 let ACTIVE_COURSE_TITLE = '';
 
-let form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
+let form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'', tags:'',
   difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
   games:{quiz:true, vf:true, estimation:true, objections:true},
   sourceMode:'upload', extractedText:'', extractedFileName:'', extracting:false };
 let generatedPrompt = '';
 let importError = '';
 let accessCourseId = null; // cours en cours d'édition sur l'écran "Gérer l'accès"
+let libSearch = '';
+let libTagFilter = null;
+let paramsUserFocus = null; // uid en cours d'édition sur l'écran Paramètres (cours affectés)
 
 function isAdmin(){ return currentUserProfile && currentUserProfile.role === 'admin'; }
 function genCode(){ return Math.floor(1000 + Math.random()*9000).toString(); }
@@ -262,12 +266,12 @@ function renderScoreboard(){
       <span class="tscore">${t.score||0} pts</span>
     </div>`;
   });
-  if(roomCode && !['library','addCourse','launch','promptStep','account','adminUsers'].includes(screenName)){
+  if(roomCode && !['library','addCourse','launch','promptStep','account','adminUsers','courseAccess'].includes(screenName)){
     html += `<button class="topbar-btn" onclick="goHub()">🏠 Menu</button>`;
   }
   if(currentUser && !roomCode){
     if(screenName!=='library') html += `<button class="topbar-btn" onclick="screenName='library'; render();">← Bibliothèque</button>`;
-    if(isAdmin()) html += `<button class="topbar-btn" onclick="screenName='adminUsers'; render();">👥 Abonnés</button>`;
+    if(isAdmin()) html += `<button class="topbar-btn" onclick="screenName='adminUsers'; render();">⚙️ Paramètres</button>`;
     html += `<button class="topbar-btn" onclick="screenName='account'; render();">⚙️ Mon compte</button>`;
     html += `<button class="topbar-btn" onclick="doLogout()">Déconnexion</button>`;
   }
@@ -372,35 +376,163 @@ function renderAccount(){
     </main>`;
 }
 
-/* ============ GESTION DES ABONNÉS (admin) ============ */
+/* ============ MODULE PARAMÈTRES (admin) ============ */
+function coursesCreatedBy(uid){ return courses.filter(c => c.createdBy === uid); }
+function coursesAssignedTo(uid){ return courses.filter(c => c.access !== 'restricted' || (c.allowedUsers && c.allowedUsers[uid])); }
+
 function renderAdminUsers(){
-  const rows = Object.entries(allUsers).map(([uid, u])=>{
-    if(u.email === ADMIN_EMAIL) return ''; // ne pas afficher l'admin principal ici
-    return `<div class="user-row">
+  const supervisorEntry = Object.entries(allUsers).find(([,u])=>u.email===ADMIN_EMAIL);
+  const supervisorRow = supervisorEntry ? `
+    <div class="user-row">
       <div>
-        <div>${u.name || u.email}</div>
-        <div class="progress-note">${u.email}</div>
+        <div>${supervisorEntry[1].name || supervisorEntry[1].email} <span class="role-tag admin">Superviseur</span></div>
+        <div class="progress-note">${supervisorEntry[1].email} — rôle verrouillé, ne peut jamais être rétrogradé ni désactivé</div>
       </div>
-      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-        <span class="role-tag ${u.disabled ? 'disabled' : u.role}">${u.disabled ? 'Désactivé' : (u.role==='admin'?'Administrateur':'Abonné')}</span>
-        <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserRole('${uid}','${u.role}')">${u.role==='admin' ? 'Rétrograder' : 'Promouvoir admin'}</button>
-        <button class="btn ${u.disabled?'':'coral'}" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserDisabled('${uid}', ${!!u.disabled})">${u.disabled ? 'Réactiver' : 'Désactiver'}</button>
+    </div>` : '';
+
+  const otherRows = Object.entries(allUsers).filter(([,u])=>u.email!==ADMIN_EMAIL).map(([uid, u])=>{
+    const created = coursesCreatedBy(uid);
+    const assigned = coursesAssignedTo(uid);
+    const expanded = paramsUserFocus === uid;
+    const courseCheckboxes = courses.map(c=>{
+      const isAllAccess = c.access !== 'restricted';
+      const checked = isAllAccess || (c.allowedUsers && c.allowedUsers[uid]);
+      return `<div class="checkbox-line ${checked?'is-checked':''}">
+        <input type="checkbox" ${checked?'checked':''} ${isAllAccess?'disabled':''} onchange="toggleCourseUserAccess('${c.id}','${uid}', this.checked)">
+        <label style="margin:0;">${c.title}${isAllAccess?' <span class="progress-note">(ouvert à tous)</span>':''}</label>
+      </div>`;
+    }).join('');
+
+    return `<div class="user-row" style="flex-direction:column; align-items:stretch;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div>
+          <div>${u.name || u.email}</div>
+          <div class="progress-note">${u.email} — ${created.length} cours créé(s), ${assigned.length} cours accessible(s)</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span class="role-tag ${u.disabled ? 'disabled' : u.role}">${u.disabled ? 'Désactivé' : (u.role==='admin'?'Administrateur':'Abonné')}</span>
+          <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserRole('${uid}','${u.role}')">${u.role==='admin' ? 'Rétrograder' : 'Promouvoir admin'}</button>
+          <button class="btn ${u.disabled?'':'coral'}" style="padding:6px 12px; font-size:0.85rem;" onclick="toggleUserDisabled('${uid}', ${!!u.disabled})">${u.disabled ? 'Réactiver' : 'Désactiver'}</button>
+          <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="paramsUserFocus = paramsUserFocus==='${uid}' ? null : '${uid}'; render();">${expanded ? 'Fermer' : '📚 Cours affectés'}</button>
+        </div>
       </div>
+      ${expanded ? `<div style="margin-top:10px; border-top:1px solid var(--navy3); padding-top:10px;">${courseCheckboxes || '<p class="progress-note">Aucun cours dans la bibliothèque.</p>'}</div>` : ''}
     </div>`;
   }).join('');
+
   return `
-    <main class="wizard" style="max-width:700px;">
-    <h1 class="title">Gestion des <span>abonnés</span></h1>
+    <main class="wizard" style="max-width:760px;">
+    <h1 class="title">Paramètres & <span>Abonnés</span></h1>
     <p class="subtitle">Désactiver un compte bloque immédiatement sa connexion. Une suppression totale et définitive nécessiterait un petit serveur (à voir plus tard si besoin).</p>
+    <button class="btn gold" style="margin-bottom:16px;" onclick="exportExcelReport()">📊 Exporter le bilan Excel</button>
     <div class="card">
-      ${rows || `<p class="progress-note">Aucun abonné pour l'instant.</p>`}
+      ${supervisorRow}
+      ${otherRows || `<p class="progress-note">Aucun abonné pour l'instant.</p>`}
     </div>
     </main>`;
 }
-function toggleUserDisabled(uid, current){ db.ref('users/'+uid+'/disabled').set(!current); }
+function toggleUserDisabled(uid, current){
+  const u = allUsers[uid];
+  if(u && u.email === ADMIN_EMAIL){ alert('Ce compte est le superviseur : il ne peut pas être désactivé.'); return; }
+  db.ref('users/'+uid+'/disabled').set(!current);
+}
 function toggleUserRole(uid, currentRole){
+  const u = allUsers[uid];
+  if(u && u.email === ADMIN_EMAIL){ alert("Ce compte est le superviseur : son rôle est verrouillé sur Administrateur."); return; }
   const next = currentRole==='admin' ? 'abonne' : 'admin';
   db.ref('users/'+uid+'/role').set(next);
+}
+
+/* ============ EXPORT EXCEL DU BILAN ============ */
+async function exportExcelReport(){
+  if(!window.ExcelJS){ alert("Le module Excel n'a pas pu se charger (vérifie ta connexion internet)."); return; }
+  const logsSnap = await db.ref('sessionLogs').once('value');
+  const logs = Object.values(logsSnap.val() || {});
+
+  const wb = new ExcelJS.Workbook();
+
+  const dash = wb.addWorksheet('Tableau de bord');
+  dash.columns = [{header:'Indicateur', key:'k', width:42},{header:'Valeur', key:'v', width:18}];
+  const totalUsers = Object.keys(allUsers).length;
+  const totalAdmins = Object.values(allUsers).filter(u=>u.role==='admin').length;
+  dash.addRows([
+    {k:'Cours dans la bibliothèque', v: courses.length},
+    {k:'Comptes utilisateurs', v: totalUsers},
+    {k:'Dont administrateurs (superviseur inclus)', v: totalAdmins},
+    {k:'Dont abonnés', v: totalUsers-totalAdmins},
+    {k:'Séances lancées (historique total)', v: logs.length},
+  ]);
+  dash.getRow(1).font = { bold:true };
+
+  const wsCourses = wb.addWorksheet('Cours');
+  wsCourses.columns = [
+    {header:'Titre', key:'title', width:40},
+    {header:'Niveau', key:'level', width:22},
+    {header:'Mots-clés', key:'tags', width:34},
+    {header:'Référentiel officiel', key:'ref', width:18},
+    {header:'Accès', key:'access', width:16},
+    {header:'Créé par', key:'author', width:28},
+    {header:'Niveaux de difficulté', key:'diffs', width:34},
+  ];
+  courses.forEach(c=>{
+    wsCourses.addRow({
+      title: c.title, level: c.level||'', tags:(c.tags||[]).join(', '),
+      ref: c.hasOfficialProgram ? 'Oui' : 'Non',
+      access: c.access==='restricted' ? 'Restreint' : 'Ouvert à tous',
+      author: c.createdByEmail || '',
+      diffs: Object.keys(c.difficulties||{}).map(d=>DIFFICULTY_LABELS[d]||d).join(', '),
+    });
+  });
+  wsCourses.getRow(1).font = { bold:true };
+
+  const wsUsers = wb.addWorksheet('Abonnés');
+  wsUsers.columns = [
+    {header:'Email', key:'email', width:32},
+    {header:'Nom', key:'name', width:22},
+    {header:'Rôle', key:'role', width:18},
+    {header:'Statut', key:'status', width:14},
+    {header:'Cours créés', key:'created', width:14},
+    {header:'Cours accessibles', key:'assigned', width:18},
+    {header:'Créé le', key:'createdAt', width:20},
+  ];
+  Object.entries(allUsers).forEach(([uid,u])=>{
+    wsUsers.addRow({
+      email: u.email, name: u.name||'',
+      role: u.email===ADMIN_EMAIL ? 'Superviseur' : (u.role==='admin'?'Administrateur':'Abonné'),
+      status: u.disabled ? 'Désactivé' : 'Actif',
+      created: coursesCreatedBy(uid).length,
+      assigned: coursesAssignedTo(uid).length,
+      createdAt: u.createdAt ? new Date(u.createdAt).toLocaleDateString('fr-FR') : '',
+    });
+  });
+  wsUsers.getRow(1).font = { bold:true };
+
+  const wsLogs = wb.addWorksheet('Historique des séances');
+  wsLogs.columns = [
+    {header:'Date', key:'date', width:20},
+    {header:'Formateur', key:'teacher', width:28},
+    {header:'Cours', key:'course', width:36},
+    {header:'Niveau de difficulté', key:'diff', width:20},
+    {header:'Code salle', key:'room', width:14},
+  ];
+  logs.sort((a,b)=>b.createdAt-a.createdAt).forEach(l=>{
+    wsLogs.addRow({
+      date: new Date(l.createdAt).toLocaleString('fr-FR'),
+      teacher: l.teacherEmail,
+      course: l.courseTitle,
+      diff: DIFFICULTY_LABELS[l.difficulty]||l.difficulty,
+      room: l.roomCode,
+    });
+  });
+  wsLogs.getRow(1).font = { bold:true };
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {type:'application/octet-stream'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'Bilan_QuizFormateurs.xlsx';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 4000);
 }
 
 /* ============ GESTION DE L'ACCÈS À UN COURS (admin) ============ */
@@ -438,6 +570,20 @@ function renderCourseAccess(){
 }
 
 /* ============ BIBLIOTHÈQUE ============ */
+function visibleCourses(){
+  const base = isAdmin() ? courses : courses.filter(c => c.access !== 'restricted' || (c.allowedUsers && currentUser && c.allowedUsers[currentUser.uid]));
+  return base.filter(c=>{
+    const matchesSearch = !libSearch || (c.title+' '+(c.level||'')+' '+(c.tags||[]).join(' ')).toLowerCase().includes(libSearch.toLowerCase());
+    const matchesTag = !libTagFilter || (c.tags||[]).includes(libTagFilter);
+    return matchesSearch && matchesTag;
+  });
+}
+function allTags(){
+  const set = new Set();
+  (isAdmin() ? courses : visibleCourses()).forEach(c=>(c.tags||[]).forEach(t=>set.add(t)));
+  return Array.from(set).sort();
+}
+
 function renderLibrary(){
   const migrationBanner = localMigrationAvailable && isAdmin() ? `
     <div class="card" style="margin-bottom:16px; text-align:center;">
@@ -445,7 +591,11 @@ function renderLibrary(){
       <button class="btn gold" onclick="migrateLocalCourses()">Importer ces cours dans la bibliothèque partagée</button>
     </div>` : '';
 
-  const cards = courses.map(c=>{
+  const tagChips = allTags().map(t=>
+    `<button class="btn ${libTagFilter===t?'gold':'secondary'}" style="padding:6px 14px; font-size:0.85rem;" onclick="libTagFilter = libTagFilter==='${t}' ? null : '${t}'; render();">${t}</button>`
+  ).join('');
+
+  const cards = visibleCourses().map(c=>{
     const diffRows = Object.entries(c.difficulties||{}).map(([diffKey, bank])=>{
       const counts = gameCounts(bank);
       const total = counts.quiz+counts.vf+counts.estimation+counts.objections;
@@ -454,6 +604,7 @@ function renderLibrary(){
         <button class="btn coral" style="padding:6px 14px; font-size:0.85rem;" onclick="openLaunch('${c.id}','${diffKey}')">▶ Lancer</button>
       </div>`;
     }).join('');
+    const tagsHtml = (c.tags||[]).length ? `<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:2px;">${(c.tags||[]).map(t=>`<span class="qtag" style="background:var(--navy3);">${t}</span>`).join('')}</div>` : '';
     return `<div class="lib-card">
       <div>
         <span class="qtag">${c.level||'Niveau libre'}</span>
@@ -462,6 +613,7 @@ function renderLibrary(){
       </div>
       <h3>${c.title}</h3>
       ${c.focusTheme ? `<p class="progress-note">Thème : ${c.focusTheme}</p>` : ''}
+      ${tagsHtml}
       ${diffRows}
       ${isAdmin() ? `<div class="btn-row" style="justify-content:flex-start; margin-top:6px;">
         <button class="btn secondary" style="padding:6px 12px; font-size:0.85rem;" onclick="accessCourseId='${c.id}'; screenName='courseAccess'; render();">🔒 Gérer l'accès</button>
@@ -473,7 +625,11 @@ function renderLibrary(){
   return `
     <main class="dashboard">
     <h1 class="title">Ma <span>bibliothèque</span> de cours</h1>
-    <p class="subtitle">${courses.length} cours disponible${courses.length>1?'s':''} — partagée entre tous les comptes</p>
+    <p class="subtitle">${visibleCourses().length} cours disponible${visibleCourses().length>1?'s':''} — partagée entre tous les comptes</p>
+    <div class="setup-row" style="max-width:420px;">
+      <input placeholder="🔎 Rechercher un cours, un niveau, un mot-clé…" value="${libSearch}" oninput="libSearch=this.value; render();">
+    </div>
+    ${tagChips ? `<div class="btn-row" style="justify-content:flex-start; margin-bottom:14px;">${tagChips}</div>` : ''}
     ${migrationBanner}
     ${isAdmin() ? `<button class="btn" onclick="screenName='addCourse'; render();">+ Ajouter un cours</button>` : ''}
     <div class="lib-grid" style="margin-top:16px;">${cards}</div>
@@ -522,6 +678,11 @@ function renderAddCourse(){
       <div class="setup-row">
         <label>Thématique à privilégier (optionnel)</label>
         <input id="themeInput" value="${form.focusTheme}" oninput="form.focusTheme=this.value" placeholder="Ex : mettre l'accent sur la prospection digitale">
+      </div>
+      <div class="setup-row">
+        <label>Mots-clés / catégorie (séparés par des virgules)</label>
+        <input id="tagsInput" value="${form.tags}" oninput="form.tags=this.value" placeholder="Ex : Marketing, Marketing Stratégique, Analyse de l'interne">
+        <p class="progress-note">Utilisés pour retrouver ce cours par filtre dans la bibliothèque.</p>
       </div>
 
       <div class="setup-row">
@@ -615,10 +776,12 @@ function generatePromptStep(){
   const levelEl = document.getElementById('levelInput');
   const programEl = document.getElementById('programInput');
   const themeEl = document.getElementById('themeInput');
+  const tagsEl = document.getElementById('tagsInput');
   if(titleEl) form.title = titleEl.value;
   if(levelEl) form.level = levelEl.value;
   if(programEl) form.programReference = programEl.value;
   if(themeEl) form.focusTheme = themeEl.value;
+  if(tagsEl) form.tags = tagsEl.value;
 
   if(!form.title.trim()){ importError = 'Merci de donner un titre au cours.'; render(); return; }
   const diffs = Object.entries(form.difficulties).filter(([,v])=>v).map(([k])=>k);
@@ -715,11 +878,12 @@ function importCourse(){
     render(); return;
   }
   const existing = courses.find(c=>c.id===parsed.id);
+  const tagList = form.tags.split(',').map(t=>t.trim()).filter(Boolean);
   const merged = existing
-    ? { ...existing, ...parsed, difficulties: { ...existing.difficulties, ...parsed.difficulties } }
-    : { access: 'all', allowedUsers: {}, ...parsed };
+    ? { ...existing, ...parsed, tags: tagList.length ? tagList : (existing.tags||[]), difficulties: { ...existing.difficulties, ...parsed.difficulties } }
+    : { access: 'all', allowedUsers: {}, tags: tagList, createdBy: currentUser.uid, createdByEmail: currentUserProfile.email, createdAt: Date.now(), ...parsed };
   db.ref('courses/'+parsed.id).set(merged);
-  form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'',
+  form = { title:'', level:'', hasReferential:false, programReference:'', focusTheme:'', tags:'',
     difficulties:{basique:false, confirme:true, expert:false, consultant_junior:false},
     games:{quiz:true, vf:true, estimation:true, objections:true},
     sourceMode:'upload', extractedText:'', extractedFileName:'', extracting:false };
@@ -785,6 +949,15 @@ function createSession(){
     createdAt: Date.now(), status: 'lobby',
     broadcast: { game:null, phase:'idle', payload:{} }, used
   }).then(()=>{
+    db.ref('sessionLogs').push({
+      teacherUid: currentUser.uid,
+      teacherEmail: currentUserProfile.email,
+      courseId: launchCourseId,
+      courseTitle: ACTIVE_COURSE_TITLE,
+      difficulty: launchDifficulty,
+      roomCode,
+      createdAt: Date.now(),
+    });
     attachGameListeners();
     screenName = 'lobby';
     render();
